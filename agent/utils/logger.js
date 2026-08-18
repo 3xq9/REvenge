@@ -1,47 +1,104 @@
-let _enabled = false;
-let _buf = [];
-let _timer = null;
+const LEVEL_DEBUG = "debug";
+const LEVEL_WARN = "warn";
+const LEVEL_ERROR = "error";
+const BATCH_SIZE = 32;
+const FLUSH_DELAY_MS = 100;
+const MAX_PENDING = 512;
 
-function _flush() {
-    if (!_buf.length) { _timer = null; return; }
-    const entries = _buf;
-    _buf = [];
+var _enabled = false;
+var _pending = [];
+var _timer = null;
+var _repeatCounts = Object.create(null);
+
+function _flush()
+{
     _timer = null;
-    try { send({ type: "LOG_BATCH", entries }); } catch (_) {}
+    if (!_pending.length) return;
+    const entries = _pending;
+    _pending = [];
+    try
+    {
+        send(
+        {
+            type: "LOG_BATCH",
+            entries
+        });
+    }
+    catch (_)
+    {}
 }
 
-function _push(lvl, msg, data) {
+function _push(level, message, data)
+{
     if (!_enabled) return;
-    const entry = { lvl, msg: String(msg || "") };
-    if (data !== undefined) entry.data = data;
-    _buf.push(entry);
-    if (_buf.length >= 32) {
+    const entry = {
+        lvl: level,
+        msg: String(message || "")
+    };
+    if (data !== void 0) entry.data = data;
+    _pending.push(entry);
+    if (_pending.length >= MAX_PENDING) _pending.splice(0, _pending.length - MAX_PENDING);
+    if (_pending.length >= BATCH_SIZE)
+    {
+        if (_timer !== null)
+        {
+            clearTimeout(_timer);
+            _timer = null;
+        }
         _flush();
-    } else if (_timer === null) {
-        _timer = setTimeout(_flush, 100);
+    }
+    else if (_timer === null)
+    {
+        _timer = setTimeout(_flush, FLUSH_DELAY_MS);
     }
 }
 
-export function setLoggingEnabled(v) {
-    const next = !!v;
+export function setLoggingEnabled(value)
+{
+    const next = !!value;
     if (next === _enabled) return;
     _enabled = next;
-    if (_enabled) {
-        _push("info", "agent logging enabled");
-    } else {
+    if (_enabled)
+    {
+        _push(LEVEL_DEBUG, "agent logging enabled");
+    }
+    else
+    {
         _flush();
+        _repeatCounts = Object.create(null);
     }
 }
 
-export function isLoggingEnabled() { return _enabled; }
+export function isLoggingEnabled()
+{
+    return _enabled;
+}
 
-export function logInfo(msg, data) { _push("info", msg, data); }
+export function logInfo(message, data)
+{
+    _push(LEVEL_DEBUG, message, data);
+}
 
-const _everyCounts = Object.create(null);
-export function logEvery(n, msg, data) {
+export function logWarn(message, data)
+{
+    _push(LEVEL_WARN, message, data);
+}
+
+export function logError(message, data)
+{
+    _push(LEVEL_ERROR, message, data);
+}
+
+export function logEvery(interval, message, data)
+{
     if (!_enabled) return;
-    const k = String(msg || "");
-    const c = (_everyCounts[k] || 0) + 1;
-    _everyCounts[k] = c;
-    if (c % (n | 0 || 1) === 0) _push("info", msg, data);
+    const key = String(message || "");
+    const count = (_repeatCounts[key] || 0) + 1;
+    _repeatCounts[key] = count;
+    if (count % (interval | 0 || 1) === 0) _push(LEVEL_DEBUG, message, data);
+}
+
+export function resetLogCounters()
+{
+    _repeatCounts = Object.create(null);
 }

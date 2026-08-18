@@ -1,50 +1,57 @@
-let _base = null;
-let _libc = null;
+var _base = null;
 
-export function libg(intervalMs = 50) {
+function mappedModule(name)
+{
+    const suffix = "/" + name.toLowerCase();
+    try
+    {
+        for (const range of Process.enumerateRanges(
+            {
+                protection: "r--",
+                coalesce: false
+            }))
+        {
+            const path = range.file && range.file.path;
+            if (typeof path !== "string" || range.file.offset !== 0) continue;
+            if (path.toLowerCase().endsWith(suffix))
+            {
+                return {
+                    name,
+                    path,
+                    base: range.base,
+                    size: range.size
+                };
+            }
+        }
+    }
+    catch (_)
+    {}
+    return null;
+}
+export function engineModule()
+{
+    return Process.findModuleByName("libg.so") || mappedModule("libg.so");
+}
+export function libg(intervalMs = 50)
+{
     if (_base) return Promise.resolve(_base);
-
-    let mod = Process.findModuleByName("libg.so");
-    if (mod) {
+    let mod = engineModule();
+    if (mod)
+    {
         _base = mod.base;
         return Promise.resolve(_base);
     }
-
-    return new Promise((resolve) => {
-        const id = setInterval(() => {
-            mod = Process.findModuleByName("libg.so");
-            if (mod) {
+    return new Promise((resolve) =>
+    {
+        const id = setInterval(() =>
+        {
+            mod = engineModule();
+            if (mod)
+            {
                 clearInterval(id);
                 _base = mod.base;
                 resolve(_base);
             }
         }, intervalMs);
     });
-}
-
-export function libc(intervalMs = 50) {
-    if (_libc) return Promise.resolve(_libc);
-
-    let mod = Process.findModuleByName("libc.so");
-    if (mod) {
-        _libc = _initLibc(mod);
-        return Promise.resolve(_libc);
-    }
-
-    return new Promise((resolve) => {
-        const id = setInterval(() => {
-            mod = Process.findModuleByName("libc.so");
-            if (mod) {
-                clearInterval(id);
-                _libc = _initLibc(mod);
-                resolve(_libc);
-            }
-        }, intervalMs);
-    });
-}
-
-function _initLibc(mod) {
-    return {
-        malloc: new NativeFunction(mod.getExportByName("malloc"), "pointer", ["uint"])
-    };
 }

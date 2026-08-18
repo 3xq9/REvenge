@@ -1,61 +1,77 @@
-import { offsets } from "../core/offsets.js";
-import { state } from "../utils/flags.js";
-import { getFunctions } from "../core/functions.js";
-import { getLibc } from "../utils/utils.js";
+import
+{
+    getFunctions
+}
+from "../core/functions.js";
+import
+{
+    offsets
+}
+from "../core/offsets.js";
+import
+{
+    state
+}
+from "../utils/flags.js";
+import
+{
+    logEvery
+}
+from "../utils/logger.js";
 
-const CMD_SPRAY = 15;
-const CMD_BUF_SIZE = 0x64;
+const SPRAY_SLOT = 10;
 
-const _opts = { intervalMs: 600 };
-let _lastFire = 0;
-let _constructCmd = null;
-let _addInput = null;
-let _zeroBuf = null;
+var _opts = {
+    intervalMs: 600
+};
+var _lastFire = 0;
+var _sendSpray = null;
 
-export function setSprayOptions(o) {
-    if (!o || typeof o !== 'object') return;
-    if (typeof o.intervalMs === 'number' && isFinite(o.intervalMs)) {
-        _opts.intervalMs = Math.max(100, Math.min(5000, o.intervalMs | 0));
+export function setSprayOptions(o)
+{
+    if (!o || typeof o !== "object") return;
+    if (typeof o.intervalMs === "number" && isFinite(o.intervalMs))
+    {
+        _opts.intervalMs = Math.max(100, Math.min(5e3, o.intervalMs | 0));
     }
 }
 
-export function resetSpray() {
+export function resetSpray()
+{
     _lastFire = 0;
 }
 
-export function setupSpray(base) {
-    try {
-        _constructCmd = new NativeFunction(
-            base.add(offsets.ClientInput_constructor_int),
-            'pointer', ['pointer', 'int']
-        );
-        _addInput = new NativeFunction(
-            base.add(offsets.ClientInputManager_addInput),
-            'void', ['pointer', 'pointer']
-        );
-    } catch (_) {
-        _constructCmd = null;
-        _addInput = null;
-    }
-    _zeroBuf = new Uint8Array(CMD_BUF_SIZE);
+export function setupSpray()
+{
+    if (_sendSpray) return;
+    _sendSpray = getFunctions().CombatHUD_sendSprayCommand;
 }
 
-export function updateSpray(now) {
-    if (!state.spray || !_constructCmd || !_addInput) return;
-    if (now === undefined) now = Date.now();
+function _battleReady()
+{
+    const battle = getFunctions().BattleMode_getInstance();
+    if (!battle || battle.isNull()) return false;
+    const objects = battle.add(offsets.BattleMode_objectManagerPtr).readPointer();
+    return !!(objects && !objects.isNull());
+}
+
+export function updateSpray(now)
+{
+    if (!state.spray || !_sendSpray) return;
+    if (now === void 0) now = Date.now();
     if (now - _lastFire < _opts.intervalMs) return;
-    try {
-        const fns = getFunctions();
-        const battle = fns.BattleMode_getInstance();
-        if (!battle || battle.isNull()) return;
-        const mgr = battle.add(offsets.BattleMode_clientInputManager).readPointer();
-        if (!mgr || mgr.isNull()) return;
-        const lc = getLibc();
-        const ci = lc.malloc(CMD_BUF_SIZE);
-        if (!ci || ci.isNull()) return;
-        Memory.writeByteArray(ci, _zeroBuf);
-        _constructCmd(ci, CMD_SPRAY);
-        _addInput(mgr, ci);
+    try
+    {
+        if (!_battleReady()) return;
+        _sendSpray(SPRAY_SLOT);
         _lastFire = now;
-    } catch (_) {}
+        logEvery(10, "spray sent",
+        {
+            slot: SPRAY_SLOT
+        });
+    }
+    catch (_)
+    {
+        _lastFire = now;
+    }
 }

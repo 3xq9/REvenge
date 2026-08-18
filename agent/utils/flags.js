@@ -1,56 +1,85 @@
-export const FLAG_AIMBOT    = 1 << 0;
-export const FLAG_AUTODODGE = 1 << 1;
-export const FLAG_ESP       = 1 << 2;
-export const FLAG_SPINNER   = 1 << 3;
-export const FLAG_KILLAURA  = 1 << 4;
-export const FLAG_CAMERA    = 1 << 5;
-export const FLAG_SPRAY     = 1 << 6;
-export const FLAG_PIN       = 1 << 7;
-export const FLAG_BRAWLTV   = 1 << 8;
-export const FLAG_SPEC      = 1 << 9;
-
-const FLAG_OF = {
-    aimbot:    FLAG_AIMBOT,
-    autododge: FLAG_AUTODODGE,
-    esp:       FLAG_ESP,
-    spinner:   FLAG_SPINNER,
-    killaura:  FLAG_KILLAURA,
-    camera:    FLAG_CAMERA,
-    spray:     FLAG_SPRAY,
-    pin:       FLAG_PIN,
-    brawltv:   FLAG_BRAWLTV,
-    spec:      FLAG_SPEC,
-};
-
-let _flags = 0;
-
-export const state = {
-    aimbot:    false,
-    autododge: false,
-    esp:       false,
-    spinner:   false,
-    killaura:  false,
-    camera:    false,
-    spray:     false,
-    pin:       false,
-    brawltv:   false,
-    spec:      false,
-};
-
-export function setState(feature, value) {
-    if (!(feature in state)) return;
-    const v = !!value;
-    state[feature] = v;
-    const bit = FLAG_OF[feature] | 0;
-    if (v) _flags |=  bit;
-    else   _flags &= ~bit;
+import
+{
+    logInfo,
+    logError
 }
+from "./logger.js";
 
-export function getFlags() { return _flags; }
+var FEATURE_NAMES = [
+    "aimbot",
+    "autododge",
+    "esp",
+    "spinner",
+    "killaura",
+    "camera",
+    "spray",
+    "pin",
+    "brawltv",
+    "spec",
+    "chatspam",
+    "fps",
+    "gradient",
+    "holdshoot",
+    "speedhack"
+];
 
-export function setupSafe(label, fn) {
-    try { fn(); }
-    catch (e) {
-        try { send({ type: 'ERROR', code: 2, text: `setup ${label}: ${e && e.message ? e.message : e}` }); } catch (_) {}
+var FLAG_OF = {};
+export var state = {};
+FEATURE_NAMES.forEach((name, index) =>
+{
+    FLAG_OF[name] = 1 << index;
+    state[name] = false;
+});
+
+export var FLAG_AIMBOT = FLAG_OF.aimbot;
+export var FLAG_AUTODODGE = FLAG_OF.autododge;
+export var FLAG_ESP = FLAG_OF.esp;
+export var FLAG_SPINNER = FLAG_OF.spinner;
+export var FLAG_KILLAURA = FLAG_OF.killaura;
+export var FLAG_SPRAY = FLAG_OF.spray;
+export var FLAG_PIN = FLAG_OF.pin;
+export var FLAG_HOLDSHOOT = FLAG_OF.holdshoot;
+export var FLAG_SPEEDHACK = FLAG_OF.speedhack;
+
+var _flags = 0;
+export function setState(feature, value)
+{
+    if (!(feature in state)) return;
+    const enabled = !!value;
+    state[feature] = enabled;
+    if (enabled) _flags |= FLAG_OF[feature];
+    else _flags &= ~FLAG_OF[feature];
+}
+export function getFlags()
+{
+    return _flags;
+}
+export function setupSafe(label, fn)
+{
+    try
+    {
+        fn();
+        logInfo(label + " ready");
+        return true;
+    }
+    catch (e)
+    {
+        const reason = e && e.message ? e.message : String(e);
+        logError(label + " setup failed",
+        {
+            reason
+        });
+        try
+        {
+            send(
+            {
+                type: "ERROR",
+                code: 2,
+                text: `setup ${label}: ${reason}`
+            });
+        }
+        catch (_)
+        {}
+        return false;
     }
 }

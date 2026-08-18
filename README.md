@@ -1,55 +1,36 @@
-# REvenge
+# REvengeBS
 
-Frida agent for BSD Brawl v67.264.
+Frida agent for **Brawl Stars v68.250** (official, arm64). Not BSD.
 
 <p align="center">
   <a href="https://discord.gg/ZksZaUeDbW"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
-## Download
 
-Setup + APK on Discord: **https://discord.gg/ZksZaUeDbW**
+## Test / download
 
-## Setup
+Join the Discord or you get nothing: **https://discord.gg/ZksZaUeDbW**
 
-1. Uninstall BlueStacks if you already have it.
-2. Run `REvenge_Setup.exe`. And install the BlueStacks build that works with the mod.
-3. Open REvenge, go to Settings, enable Root and ADB.
-4. In BlueStacks install the BSD APK (not the official Brawl Stars one).
-5. Open BSD inside BlueStacks.
+The app is here. This repo is the agent source only.
+
+## APK
+
+`apk/` is **not updated** yet. Still BSD Brawl v67.264. Don't use it on v68.250.
 
 ## Repo
 
 ```
-agent/   ES-module agent sources
-apk/     Single-file Frida-gadget repack for Android arm64
+agent/   current v68.250 sources
+apk/     old, not updated
 ```
 
-## Features
-
-- Aimbot
-- Autododge
-- Killaura
-- ESP
-- In-game button UI in the APK build
-
-## Build the APK
+## Build
 
 ```
-pip install frida-gadget --upgrade
-cd apk
-build-arm64.bat
+npm install frida-compile
+npx frida-compile agent/index.js -o dist/agent.js -B iife
 ```
 
-## Build the agent bundle
-
-```
-cd agent
-npx frida-compile index.js -o dist/agent.js -B iife
-```
-
-## Offsets
-
-`agent/core/offsets.js` is keyed to BSD Brawl v67.264 arm64. Other versions won't work.
+Offsets in `agent/core/offsets.js` are RVAs for that exact `libg.so`. Other versions won't work.
 
 ## License
 

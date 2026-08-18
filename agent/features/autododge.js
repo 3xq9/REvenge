@@ -1,928 +1,674 @@
-import { losCheck, getWallCache, getWallCacheW, getWallCacheH, getWallCacheGen } from "../utils/wallCache.js";
-import { getFunctions } from "../core/functions.js";
-import { offsets } from "../core/offsets.js";
-import { getLibc } from "../utils/utils.js";
-import { state } from "../utils/flags.js";
-import { scanData } from "../core/scanner.js";
-import { CONFIG } from "../utils/config.js";
-import { logInfo, isLoggingEnabled } from "../utils/logger.js";
-
-function _log(msg, data) {
-    logInfo(msg, data);
+import
+{
+    sendCommand
 }
-
-let _lastTickLogTs = 0;
-function _tickLog(msg, data) {
-    if (!isLoggingEnabled()) return;
-    const now = Date.now();
-    if (now - _lastTickLogTs < 500) return;
-    _lastTickLogTs = now;
-    _log(msg, data);
+from "../core/commands.js";
+import
+{
+    getFunctions
 }
+from "../core/functions.js";
+import
+{
+    offsets
+}
+from "../core/offsets.js";
+import
+{
+    enableProjectileTracking,
+    scanData
+}
+from "../core/scanner.js";
+import
+{
+    state
+}
+from "../utils/flags.js";
+import
+{
+    isLoggingEnabled,
+    logEvery,
+    logInfo
+}
+from "../utils/logger.js";
+import
+{
+    canonBrawlerName
+}
+from "../utils/brawlerName.js";
+import
+{
+    fitOf,
+    kindOf
+}
+from "../helpers/dodge_kinds.js";
+import
+{
+    blocksLinear,
+    noteBurstDeath,
+    resetProfiles,
+    shapeHazards
+}
+from "../helpers/dodge_profiles.js";
+import
+{
+    BLOCKS_MOVEMENT,
+    BLOCKS_PROJECTILES,
+    getWallCacheH,
+    getWallCacheW,
+    isBlockedWide,
+    losCheck,
+    TILE_SIZE
+}
+from "../utils/wallCache.js";
 
-const BRAWLER_AOE_IMPACT_RADIUS = {
-    6: 220, 9: 240, 22: 260, 37: 240, 40: 180, 48: 220, 82: 200,
+const MOVE_INPUT_TYPE = 2;
+var TUNE = {
+    AWARE: 1500,
+    FALLBACK: 2800,
+    TICK_MS: 16,
+    DIR_COUNT: 48,
+    SKIN: 50,
+    LOCK_MS: 130,
+    REACH: 600,
+    HORIZON_S: 1,
+    KEEP_BAND: 120,
+    MOMENTUM: 100,
+    ENGAGE: 40,
+    RELEASE_GRACE_MS: 120,
+    WALL_HIT: 9000,
+    PROBE_N: 3,
+    PROBE_T: 0.35,
+    WALL_BODY: 240
 };
-const PROJECTILE_OWNER_SNAP_DIST_SQ = 1500 * 1500;
-const URGENT_WINDOW_CACHE_MS = 250;
 
-const SPIN_RADIUS = 25;
-let SPIN_STEP = Math.PI / 4;
+var _heading = null;
+var _headingIdx = -1;
+var _holdUntil = 0;
+var _lastDangerTs = 0;
+var _lastTick = 0;
+var _muted = new Set();
+var _ring = [];
+var _scoreBuf = [];
+var _skip = new Set();
+var _options = {
+    activationDistance: 1500,
+    reactionSpeed: 50,
+    directionPrecision: 48,
+    safetyMargin: 25
+};
 
-export function setSpinnerOptions(opts) {
-    if (!opts || typeof opts !== 'object') return;
-    if (typeof opts.speed === 'number' && isFinite(opts.speed)) {
-        const t = Math.max(0, Math.min(100, opts.speed)) / 100;
-        SPIN_STEP = 0.1 + t * 1.4;
+function _buildRing()
+{
+    _ring.length = 0;
+    const n = TUNE.DIR_COUNT;
+    for (let i = 0; i < n; i++)
+    {
+        const a = Math.PI * 2 * i / n;
+        _ring.push(
+        {
+            x: Math.cos(a),
+            y: Math.sin(a)
+        });
     }
+    _scoreBuf = new Array(n).fill(0);
+    _headingIdx = -1;
+}
+_buildRing();
+
+function _syncTuning()
+{
+    TUNE.AWARE = Math.max(200, Math.min(4000, _options.activationDistance));
+    const t = Math.max(0, Math.min(100, _options.reactionSpeed)) / 100;
+    TUNE.TICK_MS = Math.max(16, Math.round(32 - t * 16));
+    TUNE.LOCK_MS = Math.max(80, Math.round(260 - t * 180));
+    const n = Math.max(8, Math.min(128, _options.directionPrecision | 0));
+    if (n !== TUNE.DIR_COUNT)
+    {
+        TUNE.DIR_COUNT = n;
+        _buildRing();
+    }
+    TUNE.SKIN = Math.max(0, Math.min(120, _options.safetyMargin)) * 2;
+}
+_syncTuning();
+
+export function getDodgeDir()
+{
+    return _heading;
 }
 
-const projectiles = new Map();
-let g_dodgeUntil = 0;
-let _dodgeDir = null;
-let _lockOriginX = 0;
-let _lockOriginY = 0;
-let _spinPhase = 0;
-let _lastSyncTime = 0;
-let _lastThreatTs = 0;
-
-const _walkCache = new Map();
-let _walkCacheTileX = -9999;
-let _walkCacheTileY = -9999;
-let _wcGen = -1;
-let _cachedUrgentWindow = 0.9;
-let _cachedUrgentWindowTs = 0;
-
-const _activeProjs = [];
-let _maxProjSpeed = 0;
-let _wc = null, _wcW = 0, _wcH = 0;
-
-let _base = null;
-let _fns = null;
-let _isBeamFn = null;
-
-const CACHED_DIRECTIONS = [];
-function _checkInitDirections() {
-    if (CACHED_DIRECTIONS.length === 0 && CONFIG.N_DIRECTIONS_FLOUMPFITOU > 0) {
-        for (let i = 0; i < CONFIG.N_DIRECTIONS_FLOUMPFITOU; i++) {
-            const a = (Math.PI * 2 * i) / CONFIG.N_DIRECTIONS_FLOUMPFITOU;
-            CACHED_DIRECTIONS.push({ x: Math.cos(a), y: Math.sin(a) });
+export function setAutododgeOptions(opts)
+{
+    if (!opts || typeof opts !== "object") return;
+    if (typeof opts.activationDistance === "number" && isFinite(opts.activationDistance))
+    {
+        _options.activationDistance = Math.max(200, Math.min(4000, opts.activationDistance));
+    }
+    if (typeof opts.reactionSpeed === "number" && isFinite(opts.reactionSpeed))
+    {
+        _options.reactionSpeed = Math.max(0, Math.min(100, opts.reactionSpeed));
+    }
+    if (typeof opts.directionPrecision === "number" && isFinite(opts.directionPrecision))
+    {
+        _options.directionPrecision = Math.max(8, Math.min(128, opts.directionPrecision | 0));
+    }
+    if (typeof opts.safetyMargin === "number" && isFinite(opts.safetyMargin))
+    {
+        _options.safetyMargin = Math.max(0, Math.min(120, opts.safetyMargin));
+    }
+    if (Array.isArray(opts.ignoredBrawlers))
+    {
+        _skip = new Set();
+        for (const name of opts.ignoredBrawlers)
+        {
+            const id = canonBrawlerName(name);
+            if (id) _skip.add(id);
         }
+        _muted.clear();
     }
+    _syncTuning();
+    logInfo("autododge tuning",
+    {
+        ignoredCount: _skip.size,
+        TICK_MS: TUNE.TICK_MS,
+        LOCK_MS: TUNE.LOCK_MS,
+        DIR_COUNT: TUNE.DIR_COUNT,
+        AWARE: TUNE.AWARE,
+        SKIN: TUNE.SKIN
+    });
 }
 
-export function getDodgeDir() { return _dodgeDir; }
-
-export function resetAutododge() {
-    _log('resetAutododge called (projMap was ' + projectiles.size + ')');
-    projectiles.clear();
-    _activeProjs.length = 0;
-    _dodgeDir = null;
-    g_dodgeUntil = 0;
-    _lockOriginX = 0;
-    _lockOriginY = 0;
-    _walkCache.clear();
-    _walkCacheTileX = -9999;
-    _walkCacheTileY = -9999;
-    _wcGen = -1;
-    _cachedUrgentWindowTs = 0;
-    _spinPhase = 0;
-    _lastThreatTs = 0;
+function _ballR(p)
+{
+    if (p.radius > 0) return p.radius;
+    return 100;
 }
 
-function getUrgentWindow() {
-    const now = Date.now();
-    if (now - _cachedUrgentWindowTs < URGENT_WINDOW_CACHE_MS) return _cachedUrgentWindow;
-    const speed = Math.max(420, Math.min(900, CONFIG.CHAR_SPEED_VROUMBOLOS || 720));
-    const norm = (speed - 420) / 480;
-    let base = CONFIG.T_URGENT_MIN_GLOUBIBOULGA + (1 - norm) * (CONFIG.T_URGENT_MAX_GLOUBIBOULGO - CONFIG.T_URGENT_MIN_GLOUBIBOULGA);
-    if (_maxProjSpeed > 1800) {
-        base += Math.min(0.25, (_maxProjSpeed - 1800) / 1080 * 0.25);
+function _traveled(p)
+{
+    const sx = p.spawnX,
+        sy = p.spawnY;
+    if (!isFinite(sx) || !isFinite(sy)) return 0;
+    return Math.hypot(p.x - sx, p.y - sy);
+}
+
+function _kindReach(p, spec, spd)
+{
+    if (spec && spec.speedMul > 0) spd *= spec.speedMul;
+    let r = spec && spec.maxRange > 0 ? spec.maxRange : 0;
+    if (spec && spec.chargedRange > 0 && spd > 3500) r = spec.chargedRange;
+    if (r <= 0 && p.isThrower && (p.targetX || p.targetY) && isFinite(p.spawnX) && isFinite(p.spawnY))
+    {
+        const td = Math.hypot(p.targetX - p.spawnX, p.targetY - p.spawnY);
+        if (td > 0) r = td;
     }
-    _cachedUrgentWindow = base;
-    _cachedUrgentWindowTs = now;
-    return base;
+    if (r <= 0) r = TUNE.FALLBACK;
+    if (spec && spec.reachAdj) r += spec.reachAdj;
+    if (r > 0 && r < 70000) return r;
+    return TUNE.FALLBACK;
 }
 
-function sameDirection(a, b) {
-    if (!a || !b) return false;
-    return (a.x * b.x + a.y * b.y) > 0.98;
-}
-
-function _walkRayClear(wx0, wy0, wx1, wy1) {
-    const w = _wcW, h = _wcH;
-    let cx = (wx0 / 300) | 0, cy = (wy0 / 300) | 0;
-    const tx1 = (wx1 / 300) | 0, ty1 = (wy1 / 300) | 0;
-    if (cx === tx1 && cy === ty1) return true;
-    const dx = Math.abs(tx1 - cx), dy = -Math.abs(ty1 - cy);
-    const sx = cx < tx1 ? 1 : -1, sy = cy < ty1 ? 1 : -1;
-    let err = dx + dy;
-    const maxSteps = dx + (-dy) + 2;
-    for (let n = 0; n < maxSteps; n++) {
-        const e2 = 2 * err;
-        if (e2 >= dy) { err += dy; cx += sx; }
-        if (e2 <= dx) { err += dx; cy += sy; }
-        if (cx < 0 || cx >= w || cy < 0 || cy >= h) return false;
-        if (_wc[cy * w + cx] & 0x80) return false;
-        if (cx === tx1 && cy === ty1) return true;
+function _lifeLeft(p, spec, spd, nowMs)
+{
+    const maxR = _kindReach(p, spec, spd);
+    if (spec && spec.fade)
+    {
+        const age = Math.max(0, nowMs - (p.spawnedAt || nowMs));
+        return Math.max(0, maxR * (1 - age / 1000));
     }
-    return true;
-}
-
-function _clampW(v, max) {
-    return v < 0 ? 0 : (v > max ? max : v);
-}
-
-function isDirectionWalkable(fromX, fromY, dirX, dirY, charRadius) {
-    const key = ((fromX / 300) | 0) * 1000000 + ((fromY / 300) | 0) * 1000 + ((dirX * 8) | 0) * 32 + ((dirY * 8) | 0);
-    const cached = _walkCache.get(key);
-    if (cached !== undefined) return cached;
-    if (!_wc) { _walkCache.set(key, true); return true; }
-
-    let probeD = CONFIG.CHAR_SPEED_VROUMBOLOS * CONFIG.PROBE_TIME_S_NIBOULAXOR;
-    if (probeD < CONFIG.PROBE_MIN_TROUFOULKIM) probeD = CONFIG.PROBE_MIN_TROUFOULKIM;
-    else if (probeD > CONFIG.PROBE_MAX_TROUFOULKAM) probeD = CONFIG.PROBE_MAX_TROUFOULKAM;
-    const toX = fromX + dirX * probeD;
-    const toY = fromY + dirY * probeD;
-    const maxWX = _wcW * 300 - 1;
-    const maxWY = _wcH * 300 - 1;
-    if (toX < 0 || toY < 0 || toX > maxWX || toY > maxWY) {
-        _walkCache.set(key, false);
-        return false;
+    if (spec && spec.home && (p.targetX || p.targetY))
+    {
+        return Math.hypot(p.targetX - p.x, p.targetY - p.y);
     }
-    const pr = charRadius * 0.9;
-    const perpX = -dirY * pr;
-    const perpY = dirX * pr;
-
-    const ok = _walkRayClear(fromX, fromY, toX, toY)
-            && _walkRayClear(_clampW(fromX + perpX, maxWX), _clampW(fromY + perpY, maxWY),
-                             _clampW(toX + perpX, maxWX),   _clampW(toY + perpY, maxWY))
-            && _walkRayClear(_clampW(fromX - perpX, maxWX), _clampW(fromY - perpY, maxWY),
-                             _clampW(toX - perpX, maxWX),   _clampW(toY - perpY, maxWY));
-
-    _walkCache.set(key, ok);
-    return ok;
+    const flown = _traveled(p);
+    return Math.max(0, maxR - flown);
 }
 
-function isProjectileBlockedByWall(px, py, tx, ty) {
-    return !losCheck(px, py, tx, ty, 0x40);
-}
-
-const _WALL_BUFFER = 180;
-const _WALL_BUFFER_LOOKAHEAD = 500;
-const _ANTI_SUICIDE_WEIGHT = 200000;
-const _ANTI_SUICIDE_THRESHOLD = 0.05;
-const _SIDESTEP_SNIPER_SPEED = 3500;
-const _SIDESTEP_WEIGHT = 1000;
-const _PROJ_PAST_THRESHOLD = -200;
-const _PERP_SKIP_MULT = 2.5;
-const _MAX_TTH_BASE_S = 1.0;
-const _MAX_TTH_SPEED_S = 0.000125;
-const _SNIPER_LOCK_BONUS_MS = 60;
-let _hasMassiveThreat = false;
-
-function _tileBlocking(wx, wy) {
-    if (!_wc) return false;
-    const tx = (wx / 300) | 0;
-    const ty = (wy / 300) | 0;
-    if (tx < 0 || tx >= _wcW || ty < 0 || ty >= _wcH) return false;
-    return (_wc[ty * _wcW + tx] & 0x80) !== 0;
-}
-
-function _computeUrgencyTier(timeToHit, rawDist, perpDist, hitRadius) {
-    let u = 1 / (timeToHit + 0.002);
-    if (perpDist < hitRadius)             u *= 20;
-    else if (perpDist < hitRadius * 1.15) u *= 8;
-    else                                  u *= 2.5;
-    if (rawDist < 250)       u *= 30;
-    else if (rawDist < 600)  u *= 12;
-    else if (rawDist < 1200) u *= 5;
-    return u;
-}
-
-function _scoreFor(p, mvx, mvy, mDirX, mDirY, myX, myY, myRadius, horizon) {
-    if (p.losBlocked || p.ignored) return { score: Infinity, clearance: Infinity, ttc: Infinity };
-    const haz = p.impactRadius || p.radius;
-    const r = (myRadius + haz) * CONFIG.HITBOX_SCALE_OUFLOUKOS + CONFIG.SAFETY_MARGIN_BILUM_STRATUM;
-    const lag = CONFIG.LAG_COMPENSATION_S_PROUTPROUT;
-    const psvx = p.dirX * p.speed;
-    const psvy = p.dirY * p.speed;
-    const px0 = p.x + psvx * lag;
-    const py0 = p.y + psvy * lag;
-    const dx = px0 - myX;
-    const dy = py0 - myY;
-    const rvx = psvx - mvx;
-    const rvy = psvy - mvy;
-    const a = rvx * rvx + rvy * rvy;
-    let tStar;
-    if (a < 1e-6) tStar = 0;
-    else {
-        tStar = -(dx * rvx + dy * rvy) / a;
-        if (tStar < 0) tStar = 0;
-        else if (tStar > horizon) tStar = horizon;
+function _inAware(myX, myY, hazard, zoneSq)
+{
+    if (hazard.segment)
+    {
+        const d = _segDist(myX, myY, hazard.segment.ax, hazard.segment.ay, hazard.segment.bx, hazard.segment.by);
+        return d * d <= zoneSq;
     }
-    const dxT = dx + rvx * tStar;
-    const dyT = dy + rvy * tStar;
-    const distMin = Math.sqrt(dxT * dxT + dyT * dyT);
-    const clearance = distMin - r;
-    const tEff = clearance >= 0 ? horizon : tStar;
-
-    let bonus = 0;
-    if (mDirX !== 0 || mDirY !== 0) {
-        const urgency = p._urgency || (1 / (tStar + 0.05));
-        const toProjX = p.x - myX;
-        const toProjY = p.y - myY;
-        const tpLenSq = toProjX * toProjX + toProjY * toProjY;
-        if (tpLenSq > 1) {
-            const invLen = 1 / Math.sqrt(tpLenSq);
-            const dotTowards = mDirX * toProjX * invLen + mDirY * toProjY * invLen;
-            if (dotTowards > _ANTI_SUICIDE_THRESHOLD) {
-                bonus -= _ANTI_SUICIDE_WEIGHT * dotTowards * urgency;
-            }
-        }
-        if (p.speed > _SIDESTEP_SNIPER_SPEED) {
-            const perpDot = Math.abs(mDirX * (-p.dirY) + mDirY * p.dirX);
-            bonus += _SIDESTEP_WEIGHT * perpDot * urgency;
-        }
-    }
-
-    const score = clearance + CONFIG.TIME_TIEBREAK_WEIGHT * tEff + bonus;
-    return { score, clearance, ttc: tStar };
+    const dx = hazard.x - myX,
+        dy = hazard.y - myY;
+    return dx * dx + dy * dy <= zoneSq;
 }
 
-function _minScore(dirX, dirY, charSpeed, myX, myY, myRadius, horizon) {
-    const projs = _activeProjs;
-    const n = projs.length;
-    if (n === 0) return { score: Infinity, clearance: Infinity, ttc: Infinity };
-    const mvx = dirX * charSpeed;
-    const mvy = dirY * charSpeed;
-    let minScore = Infinity;
-    let minC = Infinity;
-    let minT = Infinity;
-    for (let i = 0; i < n; i++) {
-        const r = _scoreFor(projs[i], mvx, mvy, dirX, dirY, myX, myY, myRadius, horizon);
-        if (r.score < minScore) minScore = r.score;
-        if (r.clearance < minC) minC = r.clearance;
-        if (r.ttc < minT) minT = r.ttc;
+function _collectLive(myX, myY, myRadius, nowMs)
+{
+    const out = [];
+    const live = new Set();
+    const shots = scanData.projectiles;
+    if (!shots || shots.length === 0)
+    {
+        if (_muted.size > 0) _muted.clear();
+        return out;
     }
-    return { score: minScore, clearance: minC, ttc: minT };
-}
-
-function _evalDir(dx, dy, charSpeed, myX, myY, myRadius, horizon, prevDir) {
-    if (!isDirectionWalkable(myX, myY, dx, dy, myRadius)) return null;
-    const m = _minScore(dx, dy, charSpeed, myX, myY, myRadius, horizon);
-    let s = m.score;
-    if (prevDir) s += (dx * prevDir.x + dy * prevDir.y) * CONFIG.MOMENTUM_BILUM_STRATUM_STARFOULILOUM;
-
-    if (_wc) {
-        const endX = myX + dx * _WALL_BUFFER_LOOKAHEAD;
-        const endY = myY + dy * _WALL_BUFFER_LOOKAHEAD;
-        if (_tileBlocking(endX + _WALL_BUFFER, endY) ||
-            _tileBlocking(endX - _WALL_BUFFER, endY) ||
-            _tileBlocking(endX, endY + _WALL_BUFFER) ||
-            _tileBlocking(endX, endY - _WALL_BUFFER)) {
-            s -= 500000;
-        }
+    const zoneSq = TUNE.AWARE * TUNE.AWARE;
+    const bodyPad = myRadius + TUNE.SKIN;
+    const deaths = scanData.destroyed;
+    if (deaths && deaths.length)
+    {
+        for (let d = 0; d < deaths.length; d++) noteBurstDeath(deaths[d]);
     }
-
-    return { score: s, clearance: m.clearance, ttc: m.ttc };
-}
-
-function _pickBestDir(myX, myY, myRadius, charSpeed, prevDir) {
-    const horizon = getUrgentWindow();
-    const stay = _minScore(0, 0, charSpeed, myX, myY, myRadius, horizon);
-    let bestScore = stay.score;
-    let bestCl = stay.clearance;
-    let bestTtc = stay.ttc;
-    let bestDir = null;
-    let bestAng = 0;
-    const samples = CACHED_DIRECTIONS;
-    for (let i = 0; i < samples.length; i++) {
-        const d = samples[i];
-        const e = _evalDir(d.x, d.y, charSpeed, myX, myY, myRadius, horizon, prevDir);
-        if (!e) continue;
-        if (e.score > bestScore) {
-            bestScore = e.score;
-            bestCl = e.clearance;
-            bestTtc = e.ttc;
-            bestDir = d;
-            bestAng = Math.atan2(d.y, d.x);
-        }
-    }
-
-    if (bestDir) {
-        let step = Math.PI / samples.length;
-        for (let lvl = 0; lvl < 2; lvl++) {
-            for (let k = -1; k <= 1; k += 2) {
-                const ang = bestAng + k * step;
-                const dx = Math.cos(ang);
-                const dy = Math.sin(ang);
-                const e = _evalDir(dx, dy, charSpeed, myX, myY, myRadius, horizon, prevDir);
-                if (!e) continue;
-                if (e.score > bestScore) {
-                    bestScore = e.score;
-                    bestCl = e.clearance;
-                    bestTtc = e.ttc;
-                    bestDir = { x: dx, y: dy };
-                    bestAng = ang;
+    for (let i = 0; i < shots.length; i++)
+    {
+        const p = shots[i];
+        const gid = p.gid;
+        if (!gid) continue;
+        live.add(gid);
+        const owner = p.ownerName;
+        if (owner && _skip.has(canonBrawlerName(owner) || owner)) _muted.add(gid);
+        if (_muted.has(gid)) continue;
+        const shaped = shapeHazards(p, nowMs);
+        if (shaped)
+        {
+            for (let c = 0; c < shaped.length; c++)
+            {
+                const cap = shaped[c];
+                const until = (cap.t1 - nowMs) / 1e3;
+                if (until <= 0) continue;
+                const hazard = {
+                    rad: cap.radius + bodyPad,
+                    blob: cap.ax === void 0,
+                    until,
+                    name: p.name || cap.name || ""
+                };
+                if (cap.ax === void 0)
+                {
+                    hazard.x = cap.x;
+                    hazard.y = cap.y;
+                    hazard.vx = 0;
+                    hazard.vy = 0;
                 }
+                else
+                {
+                    hazard.segment = cap;
+                }
+                if (_inAware(myX, myY, hazard, zoneSq)) out.push(hazard);
             }
-            step *= 0.5;
+        }
+        if (shaped && blocksLinear(p.name)) continue;
+        const name = p.name || "";
+        const spec = kindOf(name);
+        if (spec && spec.drop) continue;
+        const dx = p.x - myX,
+            dy = p.y - myY;
+        if (dx * dx + dy * dy > zoneSq) continue;
+        let vx = p.vx,
+            vy = p.vy;
+        if (!isFinite(vx) || !isFinite(vy))
+        {
+            vx = 0;
+            vy = 0;
+        }
+        const spd = Math.hypot(vx, vy);
+        const slow = (p.speed || 0) > 0 && p.speed < 1600;
+        const lockPath = !!(spec && spec.lockPath);
+        const blob = !!(spec && spec.blob) || !lockPath && (p.isThrower || slow);
+        const bodyR = myRadius + TUNE.SKIN;
+        const fit = fitOf(name);
+        const growR = spec && spec.growR || 0;
+        const shotR = _ballR(p) + growR;
+        const rad = shotR + bodyR + fit.pad + shotR * fit.grow;
+        let ux = 0,
+            uy = 0;
+        let playerAlong = 0;
+        if (spd >= 1)
+        {
+            ux = vx / spd;
+            uy = vy / spd;
+        }
+        if (!blob && spd >= 1)
+        {
+            playerAlong = (myX - p.x) * ux + (myY - p.y) * uy;
+            if (playerAlong < -50) continue;
+            if (!p.isThrower)
+            {
+                const hitX = p.x + ux * Math.max(playerAlong, 0);
+                const hitY = p.y + uy * Math.max(playerAlong, 0);
+                if (!losCheck(p.x, p.y, hitX, hitY, BLOCKS_PROJECTILES)) continue;
+            }
+        }
+        const left = _lifeLeft(p, spec, spd, nowMs);
+        if (blob)
+        {
+            const gap = Math.hypot(p.x - myX, p.y - myY) - bodyR - shotR;
+            if (left < 0.85 * gap) continue;
+        }
+        out.push(
+        {
+            x: p.x,
+            y: p.y,
+            vx: blob ? 0 : vx,
+            vy: blob ? 0 : vy,
+            rad,
+            pathLen: Math.max(left, playerAlong) + shotR,
+            left,
+            name,
+            blob,
+            owner: owner ? canonBrawlerName(owner) || owner : "",
+            age: spec && spec.fade ? Math.max(0, nowMs - (p.spawnedAt || nowMs)) : 0,
+            fadeBase: spec && spec.fadeBase || 0,
+            fadeK: spec && spec.fadeK || 0
+        });
+    }
+    for (const k of _muted)
+    {
+        if (!live.has(k)) _muted.delete(k);
+    }
+    return out;
+}
+
+function _segDist(px, py, ax, ay, bx, by)
+{
+    const dx = bx - ax,
+        dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq < 1e-6 ? 0 : ((px - ax) * dx + (py - ay) * dy) / lenSq;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+    return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+}
+
+function _fadeVel(t, dt)
+{
+    let vx = t.vx || 0;
+    let vy = t.vy || 0;
+    if (t.fadeBase && t.fadeK)
+    {
+        const now = Math.max(0, t.age || 0);
+        const later = now + (dt || 0) * 1000;
+        const cur = t.fadeBase * Math.exp(t.fadeK * now);
+        const nxt = t.fadeBase * Math.exp(t.fadeK * later);
+        if (cur > 1e-6)
+        {
+            const r = nxt / cur;
+            vx *= r;
+            vy *= r;
         }
     }
-
     return {
-        dir: bestDir,
-        score: bestScore,
-        clearance: bestCl,
-        ttc: bestTtc,
-        stayClearance: stay.clearance,
-        stayTtc: stay.ttc,
-        horizon: horizon,
+        x: vx,
+        y: vy
     };
 }
 
-const CONVERGENCE_BRAWLERS = new Set([
-    'NANI',
-]);
-
-const DEFAULT_IGNORED_BRAWLERS = [
-    'EL_PRIMO', 'MORTIS', 'ROSA', 'BIBI', 'JACKY', 'EDGAR', 'BUZZ',
-    'FANG', 'SAM', 'HANK', 'DOUG', 'MICO', 'KIT', 'DRACO', 'LILY',
-    'BULL', 'DARRYL', 'FRANK', 'ASH',
-    'BARLEY', 'DYNAMIKE', 'TICK', 'SPROUT', 'GROM', 'WILLOW',
-    'SQUEAK', 'JUJU',
-    'POCO', 'EMZ',
-    'SHADE', 'KAZE', 'ALLI', 'TRUNK', 'GIGI',
-];
-
-const _options = {
-    activationDistance: 1500,
-    reactionSpeed: 50,
-    directionPrecision: 16,
-    safetyMargin: 25,
-};
-let _ignoredBrawlersSet = new Set(DEFAULT_IGNORED_BRAWLERS);
-
-function _applyReactionSpeed(v) {
-    const t = Math.max(0, Math.min(100, v));
-    const urgentMin = 0.25 + (t / 100) * 0.45;
-    CONFIG.T_URGENT_MIN_GLOUBIBOULGA = urgentMin;
-    CONFIG.T_URGENT_MAX_GLOUBIBOULGO = urgentMin + 0.25;
-    _cachedUrgentWindowTs = 0;
-}
-
-function _applyDirectionPrecision(n) {
-    const clean = Math.max(4, Math.min(64, n | 0));
-    CONFIG.N_DIRECTIONS_FLOUMPFITOU = clean;
-    CACHED_DIRECTIONS.length = 0;
-    for (let i = 0; i < clean; i++) {
-        const a = (Math.PI * 2 * i) / clean;
-        CACHED_DIRECTIONS.push({ x: Math.cos(a), y: Math.sin(a) });
-    }
-}
-
-export function setAutododgeOptions(opts) {
-    if (!opts || typeof opts !== 'object') return;
-    if (typeof opts.activationDistance === 'number' && isFinite(opts.activationDistance)) {
-        _options.activationDistance = Math.max(100, Math.min(5000, opts.activationDistance));
-    }
-    if (typeof opts.reactionSpeed === 'number' && isFinite(opts.reactionSpeed)) {
-        _options.reactionSpeed = Math.max(0, Math.min(100, opts.reactionSpeed));
-        _applyReactionSpeed(_options.reactionSpeed);
-    }
-    if (typeof opts.directionPrecision === 'number' && isFinite(opts.directionPrecision)) {
-        _options.directionPrecision = Math.max(4, Math.min(64, opts.directionPrecision | 0));
-        _applyDirectionPrecision(_options.directionPrecision);
-    }
-    if (typeof opts.safetyMargin === 'number' && isFinite(opts.safetyMargin)) {
-        _options.safetyMargin = Math.max(0, Math.min(120, opts.safetyMargin));
-        CONFIG.SAFETY_MARGIN_BILUM_STRATUM = _options.safetyMargin;
-    }
-    if (Array.isArray(opts.ignoredBrawlers)) {
-        _ignoredBrawlersSet = new Set();
-        for (const name of opts.ignoredBrawlers) {
-            if (typeof name === 'string') _ignoredBrawlersSet.add(name.toUpperCase());
-        }
-    }
-    _log('setAutododgeOptions applied', {
-        activationDistance: _options.activationDistance,
-        reactionSpeed: _options.reactionSpeed,
-        directionPrecision: _options.directionPrecision,
-        safetyMargin: _options.safetyMargin,
-        ignoredCount: _ignoredBrawlersSet.size,
-        T_URGENT_MIN: CONFIG.T_URGENT_MIN_GLOUBIBOULGA, T_URGENT_MAX: CONFIG.T_URGENT_MAX_GLOUBIBOULGO,
-        N_DIRECTIONS: CONFIG.N_DIRECTIONS_FLOUMPFITOU,
-    });
-}
-
-function _isIgnoredProjectile(brawlerName, isBeam) {
-    if (isBeam) return true;
-    return brawlerName ? _ignoredBrawlersSet.has(brawlerName) : false;
-}
-
-function resolveImpactRadius(radius, speed, ownerBrawlerId) {
-    if (ownerBrawlerId) {
-        const aoe = BRAWLER_AOE_IMPACT_RADIUS[ownerBrawlerId];
-        if (aoe) return Math.max(radius, aoe);
-    }
-    if (radius > 0) {
-        if (speed > 0 && speed < 1200 && radius < 120) return Math.min(220, radius * 2.25);
-        return radius * 1.1;
-    }
-    if (speed <= 800) return 550;
-    if (speed >= 1400 && speed <= 1600) return 350;
-    return 220;
-}
-
-function inferProjectileOwner(x, y, enemies) {
-    if (!enemies || enemies.length === 0) return null;
-    let best = null;
-    let bestD = PROJECTILE_OWNER_SNAP_DIST_SQ;
-    for (let i = 0; i < enemies.length; i++) {
-        const en = enemies[i];
-        const dx = x - en.x, dy = y - en.y, d2 = dx * dx + dy * dy;
-        if (d2 > bestD) continue;
-        bestD = d2;
-        best = en;
-    }
-    return best ? { brawlerId: best.brawlerId, brawlerName: best.brawlerName || null, x: best.x, y: best.y } : null;
-}
-
-function _initFromCtor(projPtr) {
-    if (!projPtr || projPtr.isNull() || !_base || !_fns) return;
-    try {
-        if (scanData.lastUpdate > 0) {
-            try {
-                const team = projPtr.add(offsets.GameObj_team).readU32();
-                if (team === scanData.myTeamId) return;
-            } catch (_) {}
-        }
-        const data = _fns.LogicGameObjectClient_getData(projPtr);
-        if (!data || data.isNull()) return;
-        const vt = data.readPointer();
-        if (!vt.equals(_base.add(offsets.VTABLE_PROJECTILE_DATA))) return;
-        const gid = _fns.LogicGameObjectClient_getGlobalID(projPtr).toString();
-        if (projectiles.has(gid)) return;
-
-        const speed = _fns.LogicProjectileData_getSpeed(data) || 1200;
-        const radius = _fns.LogicProjectileData_getRadius(data) || 8;
-        const sx = _fns.LogicGameObjectClient_getX(projPtr) | 0;
-        const sy = _fns.LogicGameObjectClient_getY(projPtr) | 0;
-
-        const owner = inferProjectileOwner(sx, sy, scanData.enemies);
-        const ownerBrawlerId = owner ? owner.brawlerId : 0;
-        const ownerName = owner ? (owner.brawlerName || null) : null;
-
-        let dirX = 0, dirY = 0, unconfirmed = true;
-        try {
-            const rawAng = projPtr.add(offsets.Projectile_spawnAngle).readFloat();
-            if (isFinite(rawAng) && rawAng !== 0.0) {
-                dirX = Math.cos(rawAng);
-                dirY = Math.sin(rawAng);
-                unconfirmed = false;
+function _clearanceFor(threats, myX, myY, mvx, mvy)
+{
+    let minClear = Infinity;
+    const horizon = TUNE.HORIZON_S;
+    for (let i = 0; i < threats.length; i++)
+    {
+        const t = threats[i];
+        if (t.segment)
+        {
+            const maxT = t.until > 0 ? Math.min(horizon, t.until) : horizon;
+            for (let step = 0; step <= 4; step++)
+            {
+                const ts = maxT * (step / 4);
+                const d = _segDist(myX + mvx * ts, myY + mvy * ts, t.segment.ax, t.segment.ay, t.segment.bx, t.segment.by) - t.rad;
+                if (d < minClear) minClear = d;
             }
-        } catch (_) {}
-        if (unconfirmed && owner) {
-            const ddx = sx - owner.x;
-            const ddy = sy - owner.y;
-            const len = Math.sqrt(ddx * ddx + ddy * ddy);
-            if (len > 1) { dirX = ddx / len; dirY = ddy / len; unconfirmed = false; }
+            continue;
         }
+        const vel = _fadeVel(t, 0);
+        const spd = Math.hypot(vel.x, vel.y);
+        let maxT = horizon;
+        if (spd > 1)
+        {
+            if (t.left > 0) maxT = Math.min(maxT, t.left / spd);
+            if (t.pathLen > 0) maxT = Math.min(maxT, t.pathLen / spd);
+        }
+        if (t.until > 0) maxT = Math.min(maxT, t.until);
+        const relx = t.x - myX,
+            rely = t.y - myY;
+        const vrx = vel.x - mvx,
+            vry = vel.y - mvy;
+        const vv = vrx * vrx + vry * vry;
+        let cx, cy;
+        if (vv < 1e-6)
+        {
+            cx = relx;
+            cy = rely;
+        }
+        else
+        {
+            let ts = -(relx * vrx + rely * vry) / vv;
+            if (ts < 0) ts = 0;
+            else if (ts > maxT) ts = maxT;
+            cx = relx + vrx * ts;
+            cy = rely + vry * ts;
+        }
+        const clear = Math.sqrt(cx * cx + cy * cy) - t.rad;
+        if (clear < minClear) minClear = clear;
+    }
+    return minClear;
+}
 
-        let isBeam = false;
-        try { if (_isBeamFn) isBeam = !!_isBeamFn(data); } catch (_) {}
+function _wallAhead(myX, myY, dir, speed, bodyR)
+{
+    const step = speed * TUNE.PROBE_T;
+    let raw = 0;
+    for (let s = 1; s <= TUNE.PROBE_N; s++)
+    {
+        const px = myX + dir.x * step * s;
+        const py = myY + dir.y * step * s;
+        if (isBlockedWide(px, py, bodyR, BLOCKS_MOVEMENT))
+        {
+            raw += TUNE.WALL_HIT * (TUNE.PROBE_N - s + 1);
+        }
+    }
+    return raw;
+}
 
-        const ignoredType = _isIgnoredProjectile(ownerName, isBeam);
+function _wallR()
+{
+    return TUNE.WALL_BODY;
+}
 
-        const now = Date.now();
-        projectiles.set(gid, {
-            addr: projPtr,
-            gid: gid,
-            x: sx, y: sy,
-            dirX: dirX, dirY: dirY,
-            speed: speed, radius: radius,
-            impactRadius: resolveImpactRadius(radius, speed, ownerBrawlerId),
-            lastX: sx, lastY: sy, lastSeen: now, staleFrames: 0,
-            unconfirmed: unconfirmed,
-            ownerBrawlerId: ownerBrawlerId,
-            ownerBrawlerName: ownerName,
-            ownerLocked: !!owner,
-            ignored: ignoredType,
-            losBlocked: false, losMyTileX: -9999, losMyTileY: -9999,
-            losProjTileX: -9999, losProjTileY: -9999,
+export function clampMoveTarget(tx, ty)
+{
+    return _clampTarget(tx, ty);
+}
+
+export function sendBattleMove(logic, tx, ty)
+{
+    return _sendMove(logic, tx, ty);
+}
+
+function _clampToMap(v, maxTiles)
+{
+    const max = maxTiles * TILE_SIZE - 1;
+    if (max <= 0) return v;
+    if (v < 0) return 0;
+    if (v > max) return max;
+    return v;
+}
+
+function _clampTarget(tx, ty)
+{
+    const w = getWallCacheW(),
+        h = getWallCacheH();
+    if (w <= 0 || h <= 0) return {
+        x: tx,
+        y: ty
+    };
+    return {
+        x: _clampToMap(tx, w),
+        y: _clampToMap(ty, h)
+    };
+}
+
+function _sendMove(logic, tx, ty)
+{
+    if (!logic || logic.isNull()) return false;
+    try
+    {
+        const fns = getFunctions();
+        fns.LogicBattleModeClient_setClientPredictionMoveTo(logic, tx, ty, 1);
+        return sendCommand(MOVE_INPUT_TYPE, (ci) =>
+        {
+            ci.add(offsets.ClientInput_x).writeS32(tx);
+            ci.add(offsets.ClientInput_y).writeS32(ty);
         });
-    } catch (_) {}
-}
-
-function _createFromScan(sp, now) {
-    const owner = inferProjectileOwner(sp.x, sp.y, scanData.enemies);
-    const ownerBrawlerId = owner ? owner.brawlerId : 0;
-    const ownerName = owner ? (owner.brawlerName || null) : null;
-
-    let dirX = 0, dirY = 0, unconfirmed = true;
-    const ang = sp.spawnAngle;
-    if (ang !== null && ang !== undefined && isFinite(ang) && ang !== 0.0) {
-        dirX = Math.cos(ang);
-        dirY = Math.sin(ang);
-        unconfirmed = false;
     }
-    if (unconfirmed && owner) {
-        const ddx = sp.x - owner.x;
-        const ddy = sp.y - owner.y;
-        const len = Math.sqrt(ddx * ddx + ddy * ddy);
-        if (len > 1) {
-            dirX = ddx / len;
-            dirY = ddy / len;
-            unconfirmed = false;
-        }
-    }
-
-    const ignoredType = _isIgnoredProjectile(ownerName, !!sp.isBeam);
-
-    projectiles.set(sp.gid, {
-        gid: sp.gid,
-        x: sp.x, y: sp.y,
-        dirX: dirX, dirY: dirY,
-        speed: sp.speed, radius: sp.radius,
-        impactRadius: resolveImpactRadius(sp.radius, sp.speed, ownerBrawlerId),
-        lastX: sp.x, lastY: sp.y, lastSeen: now,
-        unconfirmed: unconfirmed,
-        ownerBrawlerId: ownerBrawlerId,
-        ownerBrawlerName: ownerName,
-        ownerLocked: !!owner,
-        ignored: ignoredType,
-        losBlocked: false, losMyTileX: -9999, losMyTileY: -9999,
-        losProjTileX: -9999, losProjTileY: -9999,
-    });
-}
-
-function syncProjectiles(now) {
-    if (now === _lastSyncTime) return;
-    _lastSyncTime = now;
-    const charX = scanData.myX, charY = scanData.myY;
-    const maxD2 = CONFIG.MAX_TRACK_DIST_GRIBOULZINON * CONFIG.MAX_TRACK_DIST_GRIBOULZINON;
-    const staleMax = CONFIG.STALE_FRAMES_MAX_DROUBLOUKAZ;
-
-    let scanByGid = null;
-    const enemies = scanData.enemies;
-    for (let i = 0; i < enemies.length; i++) {
-        if (CONVERGENCE_BRAWLERS.has(enemies[i].brawlerName)) {
-            const scanProj = scanData.projectiles;
-            scanByGid = new Map();
-            for (let j = 0; j < scanProj.length; j++) scanByGid.set(scanProj[j].gid, scanProj[j]);
-            break;
-        }
-    }
-
-    for (const [gid, pr] of projectiles) {
-        let nx, ny, spRef = null;
-        if (pr.addr) {
-            try {
-                nx = _fns.LogicGameObjectClient_getX(pr.addr) | 0;
-                ny = _fns.LogicGameObjectClient_getY(pr.addr) | 0;
-            } catch (_) {
-                projectiles.delete(gid);
-                continue;
-            }
-        } else if (scanByGid) {
-            spRef = scanByGid.get(gid);
-            if (!spRef) {
-                if (now - pr.lastSeen > CONFIG.STALE_MS_KROUMBLATImir) projectiles.delete(gid);
-                continue;
-            }
-            nx = spRef.x; ny = spRef.y;
-        } else {
-            if (now - pr.lastSeen > CONFIG.STALE_MS_KROUMBLATImir) projectiles.delete(gid);
-            continue;
-        }
-
-        const ddx = nx - charX, ddy = ny - charY;
-        if (ddx * ddx + ddy * ddy > maxD2) {
-            projectiles.delete(gid);
-            continue;
-        }
-
-        const dx = nx - pr.lastX, dy = ny - pr.lastY;
-        const moved2 = dx * dx + dy * dy;
-        if (moved2 < 25) {
-            if (pr.addr) {
-                pr.staleFrames++;
-                if (pr.staleFrames > staleMax) {
-                    projectiles.delete(gid);
-                    continue;
-                }
-            }
-        } else {
-            if (pr.addr) pr.staleFrames = 0;
-            const inv = 1 / Math.sqrt(moved2);
-            pr.dirX = dx * inv;
-            pr.dirY = dy * inv;
-            pr.unconfirmed = false;
-            if (!pr.ownerLocked) {
-                const owner = inferProjectileOwner(nx, ny, enemies);
-                if (owner) {
-                    pr.ownerLocked = true;
-                    pr.ownerBrawlerId = owner.brawlerId;
-                    pr.ownerBrawlerName = owner.brawlerName || null;
-                    const sRad = spRef ? spRef.radius : pr.radius;
-                    const sSpd = spRef ? spRef.speed : pr.speed;
-                    pr.impactRadius = resolveImpactRadius(sRad, sSpd, owner.brawlerId);
-                    pr.ignored = _isIgnoredProjectile(pr.ownerBrawlerName, spRef ? !!spRef.isBeam : false);
-                }
-            }
-        }
-        pr.x = nx; pr.y = ny;
-        pr.lastX = nx; pr.lastY = ny;
-        pr.lastSeen = now;
-    }
-
-    if (scanByGid) {
-        for (const sp of scanByGid.values()) {
-            if (projectiles.has(sp.gid)) continue;
-            const ddx = sp.x - charX, ddy = sp.y - charY;
-            if (ddx * ddx + ddy * ddy > maxD2) continue;
-            _createFromScan(sp, now);
-        }
+    catch (e)
+    {
+        logInfo("autododge send failed",
+        {
+            err: String(e && e.message || e)
+        });
+        return false;
     }
 }
 
-function buildActiveList(myX, myY, myRadius, tileX, tileY) {
-    _activeProjs.length = 0;
-    _maxProjSpeed = 0;
-    _hasMassiveThreat = false;
-    const baseAct = _options.activationDistance;
-    const leadS = CONFIG.ACTIVATION_LEAD_S_FROUMBAXOR;
-    const maxTrack = CONFIG.MAX_TRACK_DIST_GRIBOULZINON;
-    for (const p of projectiles.values()) {
-        const ptx = (p.x / 300) | 0;
-        const pty = (p.y / 300) | 0;
-        if (p.losMyTileX !== tileX || p.losMyTileY !== tileY || p.losProjTileX !== ptx || p.losProjTileY !== pty) {
-            p.losBlocked = isProjectileBlockedByWall(p.x, p.y, myX, myY);
-            p.losMyTileX = tileX;
-            p.losMyTileY = tileY;
-            p.losProjTileX = ptx;
-            p.losProjTileY = pty;
-        }
-        if (p.unconfirmed) continue;
-        let eff = p.speed * leadS;
-        if (eff < baseAct) eff = baseAct;
-        else if (eff > maxTrack) eff = maxTrack;
-        const actMaxSq = eff * eff;
-        const ddx = p.x - myX;
-        const ddy = p.y - myY;
-        const distSq = ddx * ddx + ddy * ddy;
-        if (distSq > actMaxSq) continue;
-
-        const haz = p.impactRadius || p.radius;
-        const isSlow = (p.speed <= 800);
-
-        if (!p.ignored && !p.losBlocked && !isSlow) {
-            if (_tileBlocking(p.x, p.y)) {
-                p._urgency = 0;
-                continue;
-            }
-            const dx = myX - p.x;
-            const dy = myY - p.y;
-            const dotToPlayer = dx * p.dirX + dy * p.dirY;
-            if (dotToPlayer < _PROJ_PAST_THRESHOLD) {
-                p._urgency = 0;
-                continue;
-            }
-            const projection = dotToPlayer < 0 ? 0 : (dotToPlayer > 8000 ? 8000 : dotToPlayer);
-            const closestX = p.x + p.dirX * projection;
-            const closestY = p.y + p.dirY * projection;
-            const dclX = myX - closestX;
-            const dclY = myY - closestY;
-            const perpDist = Math.sqrt(dclX * dclX + dclY * dclY);
-            const dynamicBuffer = haz * (1.1 + p.speed * 0.0002);
-            if (perpDist > dynamicBuffer * _PERP_SKIP_MULT) {
-                p._urgency = 0;
-                continue;
-            }
-            const rawDist = Math.sqrt(distSq);
-            const timeToHit = rawDist / (p.speed < 1 ? 1 : p.speed);
-            if (timeToHit > _MAX_TTH_BASE_S + p.speed * _MAX_TTH_SPEED_S) {
-                p._urgency = 0;
-                continue;
-            }
-            p._urgency = _computeUrgencyTier(timeToHit, rawDist, perpDist, haz);
-            if (haz > 380) _hasMassiveThreat = true;
-        } else {
-            p._urgency = 0;
-        }
-
-        if (!p.ignored && p.speed > _maxProjSpeed) _maxProjSpeed = p.speed;
-        _activeProjs.push(p);
-    }
+function _clearHeading()
+{
+    _heading = null;
+    _headingIdx = -1;
+    _holdUntil = 0;
 }
 
-export function updateAutododge() {
+export function updateAutododge()
+{
     if (!state.autododge) return;
-    _checkInitDirections();
     if (scanData.lastUpdate === 0) return;
-
     const now = Date.now();
-
-    const myX = scanData.myX, myY = scanData.myY;
+    if (now - _lastTick < TUNE.TICK_MS) return;
+    _lastTick = now;
+    const myX = scanData.myX;
+    const myY = scanData.myY;
+    const speed = scanData.mySpeed || 720;
     const myRadius = scanData.myRadius || 60;
-
-    _wc = getWallCache();
-    _wcW = getWallCacheW();
-    _wcH = getWallCacheH();
-
-    const gen = getWallCacheGen();
-    if (gen !== _wcGen) {
-        _walkCache.clear();
-        _walkCacheTileX = -9999;
-        for (const p of projectiles.values()) p.losMyTileX = -9999;
-        _wcGen = gen;
-    }
-
-    const tileX = (myX / 300) | 0;
-    const tileY = (myY / 300) | 0;
-    if (tileX !== _walkCacheTileX || tileY !== _walkCacheTileY) {
-        _walkCache.clear();
-        _walkCacheTileX = tileX;
-        _walkCacheTileY = tileY;
-    }
-
-    CONFIG.CHAR_SPEED_VROUMBOLOS = scanData.mySpeed;
-    syncProjectiles(now);
-    buildActiveList(myX, myY, myRadius, tileX, tileY);
-
-    if (_hasMassiveThreat) {
-        _tickLog('massive AoE incoming, releasing dodge');
-        _dodgeDir = null;
-        g_dodgeUntil = 0;
-        return;
-    }
-
-    const charSpeed = CONFIG.CHAR_SPEED_VROUMBOLOS || 720;
-    const prevDir = _dodgeDir;
-
-    const picked = _pickBestDir(myX, myY, myRadius, charSpeed, prevDir);
-    const stayCl = picked.stayClearance;
-    const stayTtc = picked.stayTtc;
-    const bestScore = picked.score;
-    const bestCl = picked.clearance;
-    const bestTtc = picked.ttc;
-    const mustDodge = prevDir !== null ? (stayCl < CONFIG.DODGE_EXIT_CLEARANCE_FROUMOUSTAR) : (stayCl < 0);
-
-    if (isLoggingEnabled()) {
-        _tickLog('upd', {
-            projMap: projectiles.size,
-            activeProjs: _activeProjs.length,
-            horizon: picked.horizon.toFixed(3),
-            stayCl: (stayCl === Infinity ? 'inf' : stayCl.toFixed(0)),
-            stayTtc: (stayTtc === Infinity ? 'inf' : stayTtc.toFixed(3)),
-            bestCl: (bestCl === Infinity ? 'inf' : bestCl.toFixed(0)),
-            bestTtc: (bestTtc === Infinity ? 'inf' : bestTtc.toFixed(3)),
-            bestDir: picked.dir ? `(${picked.dir.x.toFixed(2)},${picked.dir.y.toFixed(2)})` : null,
-            mustDodge,
-            prevDir: prevDir ? `(${prevDir.x.toFixed(2)},${prevDir.y.toFixed(2)})` : null,
-            commitMsLeft: prevDir ? Math.max(0, g_dodgeUntil - now) : 0,
+    const logging = isLoggingEnabled();
+    const hazards = _collectLive(myX, myY, myRadius, now);
+    if (logging)
+    {
+        logEvery(60, "heartbeat",
+        {
+            myX,
+            myY,
+            speed,
+            myR: myRadius,
+            scanProj: scanData.projectiles ? scanData.projectiles.length : -1,
+            threats: hazards.length,
+            tracks: _muted.size,
+            scan: TUNE.AWARE,
+            pad: TUNE.SKIN,
+            nDirs: TUNE.DIR_COUNT
         });
     }
-
-    if (!mustDodge) {
-        if (prevDir && (now - _lastThreatTs) < CONFIG.RELEASE_GRACE_MS_PLOUKAZ
-            && isDirectionWalkable(myX, myY, prevDir.x, prevDir.y, myRadius)) {
-            _dodgeDir = prevDir;
-            return;
-        }
-        if (prevDir) _log('release (stayCl>=0)', { stayCl: stayCl === Infinity ? 'inf' : stayCl.toFixed(0) });
-        _dodgeDir = null;
+    if (hazards.length === 0)
+    {
+        if (_heading && now - _lastDangerTs > TUNE.RELEASE_GRACE_MS) _clearHeading();
         return;
     }
-
-    _lastThreatTs = now;
-
-    if (!picked.dir) {
-        if (prevDir) _log('release (no walkable better than stay)', { stayCl: stayCl.toFixed(0) });
-        _dodgeDir = null;
+    let hasBlob = false;
+    const names = [];
+    for (let i = 0; i < hazards.length; i++)
+    {
+        if (hazards[i].blob) hasBlob = true;
+        if (hazards[i].name && names.length < 4) names.push(hazards[i].name);
+    }
+    const stayClear = _clearanceFor(hazards, myX, myY, 0, 0);
+    const inDanger = stayClear < TUNE.ENGAGE;
+    if (inDanger) _lastDangerTs = now;
+    if (!inDanger && (!_heading || now - _lastDangerTs > TUNE.RELEASE_GRACE_MS))
+    {
+        if (_heading) _clearHeading();
+        if (logging) logEvery(30, "safe-no-dodge",
+        {
+            stayClear: stayClear | 0,
+            threats: hazards.length,
+            names
+        });
         return;
     }
-
-    let safeDir = picked.dir;
-    const desperate = bestCl < 0;
-
-    if (prevDir && isDirectionWalkable(myX, myY, prevDir.x, prevDir.y, myRadius)) {
-        const prevM = _minScore(prevDir.x, prevDir.y, charSpeed, myX, myY, myRadius, picked.horizon);
-        if (prevM.clearance >= 0) {
-            safeDir = prevDir;
-        } else if (desperate) {
-            if (prevM.clearance >= bestCl - CONFIG.DESPERATE_KEEP_BAND_GLOUMRAKOS) safeDir = prevDir;
-        } else if (now < g_dodgeUntil && prevM.clearance >= bestCl - CONFIG.COMMIT_KEEP_BAND_WOULOUKOS) {
-            safeDir = prevDir;
+    const prevIdx = _headingIdx >= 0 && _headingIdx < _ring.length ? _headingIdx : -1;
+    const prevDir = prevIdx >= 0 ? _ring[prevIdx] : null;
+    const bodyR = _wallR();
+    let bestIdx = 0,
+        bestScore = -Infinity;
+    for (let i = 0; i < _ring.length; i++)
+    {
+        const d = _ring[i];
+        let s = _clearanceFor(hazards, myX, myY, speed * d.x, speed * d.y);
+        s -= _wallAhead(myX, myY, d, speed, bodyR);
+        if (prevDir) s += TUNE.MOMENTUM * (d.x * prevDir.x + d.y * prevDir.y);
+        _scoreBuf[i] = s;
+        if (s > bestScore)
+        {
+            bestScore = s;
+            bestIdx = i;
         }
     }
-
-    if (prevDir && now < g_dodgeUntil) {
-        const ddx = myX - _lockOriginX;
-        const ddy = myY - _lockOriginY;
-        const dmax = CONFIG.LOCK_DRIFT_MAX_SCHMOULBIDOU;
-        if (ddx * ddx + ddy * ddy > dmax * dmax) g_dodgeUntil = now;
-    }
-
-    let urgentSniper = false;
-    for (let i = 0; i < _activeProjs.length; i++) {
-        const ap = _activeProjs[i];
-        if (ap.losBlocked || ap.ignored) continue;
-        if (ap.speed > _SIDESTEP_SNIPER_SPEED && (ap._urgency || 0) > 0) { urgentSniper = true; break; }
-    }
-
-    const dirChanged = !sameDirection(prevDir, safeDir);
-    _dodgeDir = safeDir;
-    if (dirChanged) {
-        g_dodgeUntil = now + CONFIG.DODGE_COMMIT_MS_BOULGAZOR + (urgentSniper ? _SNIPER_LOCK_BONUS_MS : 0);
-        _lockOriginX = myX;
-        _lockOriginY = myY;
-        if (isLoggingEnabled()) {
-            _log('dodge commit', {
-                dir: `(${safeDir.x.toFixed(2)},${safeDir.y.toFixed(2)})`,
-                score: bestScore === Infinity ? 'inf' : bestScore.toFixed(0),
-                cl: bestCl === Infinity ? 'inf' : bestCl.toFixed(0),
-                ttc: bestTtc === Infinity ? 'inf' : bestTtc.toFixed(3),
-                stayCl: stayCl === Infinity ? 'inf' : stayCl.toFixed(0),
-                desp: desperate,
-            });
+    let chosenIdx = bestIdx;
+    if (prevIdx >= 0 && now < _holdUntil && chosenIdx !== prevIdx)
+    {
+        if (_scoreBuf[prevIdx] + TUNE.KEEP_BAND >= _scoreBuf[chosenIdx])
+        {
+            chosenIdx = prevIdx;
         }
+        else
+        {
+            _holdUntil = now + TUNE.LOCK_MS;
+        }
+    }
+    else if (now >= _holdUntil)
+    {
+        _holdUntil = now + TUNE.LOCK_MS;
+    }
+    if (_scoreBuf[chosenIdx] <= stayClear)
+    {
+        if (_heading) _clearHeading();
+        return;
+    }
+    const chosen = _ring[chosenIdx];
+    _headingIdx = chosenIdx;
+    _heading = chosen;
+    const target = {
+        x: Math.round(myX + chosen.x * TUNE.REACH),
+        y: Math.round(myY + chosen.y * TUNE.REACH)
+    };
+    const ok = state.speedhack ? true : _sendMove(scanData.battleModeClient, target.x, target.y);
+    if (logging)
+    {
+        logEvery(15, "dodge",
+        {
+            threats: hazards.length,
+            stayClear: stayClear | 0,
+            nx: +chosen.x.toFixed(2),
+            ny: +chosen.y.toFixed(2),
+            score: _scoreBuf[chosenIdx] | 0,
+            reach: TUNE.REACH,
+            committed: chosenIdx === prevIdx,
+            sent: ok,
+            area: hasBlob,
+            names
+        });
     }
 }
 
-export function setupAutododge(base) {
-    _base = base;
-    _fns = getFunctions();
-    _checkInitDirections();
-    _log('setupAutododge: base=' + base.toString());
-
-    try {
-        _isBeamFn = new NativeFunction(base.add(offsets.LogicProjectileData__isBeam), 'bool', ['pointer']);
-        _log('setup: _isBeamFn OK');
-    } catch (e) {
-        _isBeamFn = null;
-        _log('setup: _isBeamFn FAILED: ' + (e && e.message));
-    }
-
-    try {
-        Interceptor.attach(base.add(offsets.Projectile_ctor), {
-            onEnter: function (args) { this._proj = args[1]; },
-            onLeave: function () { _initFromCtor(this._proj); }
+export function resetAutododge()
+{
+    if (isLoggingEnabled() && (_muted.size > 0 || _heading))
+    {
+        logInfo("resetAutododge",
+        {
+            tracks: _muted.size
         });
-        _log('setup: Projectile_ctor hook attached');
-    } catch (e) {
-        _log('setup: Projectile_ctor hook FAILED: ' + (e && e.message));
     }
+    _muted.clear();
+    resetProfiles();
+    _clearHeading();
+    _lastDangerTs = 0;
+    _lastTick = 0;
+}
 
-    try {
-        Interceptor.attach(base.add(offsets.BattleScreen__updateMovement), {
-            onEnter: function (args) {
-                let tx, ty;
-
-                if (state.autododge && _dodgeDir) {
-                    const d = _dodgeDir;
-                    if (!isFinite(d.x) || !isFinite(d.y)) return;
-                    tx = Math.round(scanData.myX + d.x * 500);
-                    ty = Math.round(scanData.myY + d.y * 500);
-                    if (_wcW > 0) {
-                        tx = _clampW(tx, _wcW * 300 - 1);
-                        ty = _clampW(ty, _wcH * 300 - 1);
-                    }
-                } else if (state.spinner) {
-                    _spinPhase += SPIN_STEP;
-                    if (_spinPhase >= Math.PI * 2) _spinPhase -= Math.PI * 2;
-                    tx = Math.round(scanData.myX + Math.cos(_spinPhase) * SPIN_RADIUS);
-                    ty = Math.round(scanData.myY + Math.sin(_spinPhase) * SPIN_RADIUS);
-                } else {
-                    return;
-                }
-
-                if (!isFinite(tx) || !isFinite(ty)) return;
-                if (Math.abs(tx) > 100000 || Math.abs(ty) > 100000) return;
-
-                try {
-                    const self = args[0];
-                    if (!self || self.isNull()) return;
-                    const fns = getFunctions();
-                    const logic = fns.BattleScreen_getLogicBattleModeClient(self);
-                    if (!logic || logic.isNull()) return;
-
-                    fns.LogicBattleModeClient_setClientPredictionMoveTo(logic, tx, ty, 1);
-
-                    const battle = fns.BattleMode_getInstance();
-                    if (!battle || battle.isNull()) return;
-                    const manager = battle.add(offsets.BattleMode_clientInputManager).readPointer();
-                    if (!manager || manager.isNull()) return;
-
-                    const lc = getLibc();
-                    const ci = lc.malloc(64);
-                    fns.ClientInput_constructor_int(ci, 2);
-                    ci.add(offsets.ClientInput_x).writeS32(tx);
-                    ci.add(offsets.ClientInput_y).writeS32(ty);
-                    fns.ClientInputManager_addInput(manager, ci);
-                } catch (_) {}
-            }
-        });
-    } catch (_) {}
+export function setupAutododge()
+{
+    enableProjectileTracking();
 }

@@ -1,21 +1,15 @@
-import { offsets } from "../core/offsets.js";
-
-let _lastServerIP = null;
-
-function readScString(p) {
-    try {
-        if (!p || p.isNull()) return null;
-        const len = p.add(offsets.ScString_length).readU32();
-        if (len === 0 || len > 256) return null;
-        const sp = len < 8 ? p.add(offsets.ScString_data) : p.add(offsets.ScString_data).readPointer();
-        if (!sp || sp.isNull()) return null;
-        return sp.readUtf8String(len);
-    } catch (_) { return null; }
+import
+{
+    logInfo
 }
+from "../utils/logger.js";
+var _lastServerIP = null;
+var _pollTimer = null;
 
-function isPublicIp(ip) {
+function isPublicIp(ip)
+{
     if (!ip || !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) return false;
-    const p = ip.split('.').map(Number);
+    const p = ip.split(".").map(Number);
     if (p[0] === 0 || p[0] === 127) return false;
     if (p[0] === 10) return false;
     if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return false;
@@ -25,58 +19,92 @@ function isPublicIp(ip) {
     return true;
 }
 
-function reportIp(ip, port) {
-    const full = ip + ':' + port;
+function reportIp(ip, port)
+{
+    const full = ip + ":" + port;
     if (_lastServerIP === full) return;
     _lastServerIP = full;
-    send({ type: 'IP_CAPTURED', data: full });
+    logInfo("server ip captured",
+    {
+        endpoint: full
+    });
+    if (_pollTimer !== null)
+    {
+        clearInterval(_pollTimer);
+        _pollTimer = null;
+    }
+    send(
+    {
+        type: "IP_CAPTURED",
+        data: full
+    });
 }
 
-export function setupIPGrabber(base) {
-    try {
-        Interceptor.attach(base.add(offsets.MessageManager__receiveMessage), {
-            onEnter: function(args) {
-                const msg = this.context.x1;
-                if (!msg || msg.isNull()) return;
-                try {
-                    const port = msg.add(offsets.Message_port).readS32();
-                    if (port <= 0 || port > 65535) return;
-                    const ipPtr = msg.add(offsets.Message_ipPtr).readPointer();
-                    const ip = readScString(ipPtr);
-                    if (!isPublicIp(ip)) return;
-                    reportIp(ip, port);
-                } catch (_) {}
-            }
-        });
-    } catch (_) {}
-
-    try {
-        let connectAddr = Module.findExportByName('libc.so', 'connect')
-            || Module.findExportByName('libc.so.6', 'connect')
-            || Module.findExportByName(null, 'connect');
-        if (!connectAddr) return;
-
-        Interceptor.attach(connectAddr, {
-            onEnter: function(args) {
-                try {
-                    const sa = args[1];
-                    if (!sa || sa.isNull()) return;
-                    if (sa.readU16() !== 2) return;
-                    const port = ((sa.add(offsets.SockAddr_portHi).readU8() << 8) | sa.add(offsets.SockAddr_portLo).readU8());
-                    if (port <= 1024 || port > 65535) return;
-                    const b0 = sa.add(offsets.SockAddr_addr0).readU8();
-                    const b1 = sa.add(offsets.SockAddr_addr1).readU8();
-                    const b2 = sa.add(offsets.SockAddr_addr2).readU8();
-                    const b3 = sa.add(offsets.SockAddr_addr3).readU8();
-                    const ip = `${b0}.${b1}.${b2}.${b3}`;
-                    if (!isPublicIp(ip)) return;
-                    reportIp(ip, port);
-                } catch (_) {}
-            }
-        });
-    } catch (_) {}
+function parseTcpEndpoint(value)
+{
+    try
+    {
+        const parts = String(value || "").split(":");
+        if (parts.length !== 2 || parts[0].length !== 8) return null;
+        const bytes = [];
+        for (let i = 0; i < 4; i++)
+        {
+            const byte = parseInt(parts[0].slice(i * 2, i * 2 + 2), 16);
+            if (!Number.isFinite(byte)) return null;
+            bytes.push(byte);
+        }
+        bytes.reverse();
+        const port = parseInt(parts[1], 16);
+        if (!Number.isFinite(port) || port <= 0 || port > 65535) return null;
+        return {
+            ip: bytes.join("."),
+            port
+        };
+    }
+    catch (_)
+    {
+        return null;
+    }
 }
 
-export function getServerIP() {
-    return _lastServerIP || 'Not connected';
+function scanEstablishedConnections()
+{
+    try
+    {
+        if (typeof File !== "function") return false;
+        const lines = File.readAllText("/proc/self/net/tcp").split(/\r?\n/);
+        for (let i = 1; i < lines.length; i++)
+        {
+            const fields = lines[i].trim().split(/\s+/);
+            const state = fields[3];
+            if (fields.length < 4 || state !== "01") continue;
+            const endpoint = parseTcpEndpoint(fields[2]);
+            if (!endpoint || !isPublicIp(endpoint.ip)) continue;
+            if (endpoint.port !== 80 && endpoint.port !== 443)
+            {
+                reportIp(endpoint.ip, endpoint.port);
+                return true;
+            }
+        }
+    }
+    catch (_)
+    {}
+    return false;
+}
+export function setupIPGrabber()
+{
+    if (scanEstablishedConnections() || _pollTimer !== null) return;
+    _pollTimer = setInterval(scanEstablishedConnections, 1000);
+}
+export function resetIPGrabber()
+{
+    if (_pollTimer !== null)
+    {
+        clearInterval(_pollTimer);
+        _pollTimer = null;
+    }
+}
+export function getServerIP()
+{
+    return _lastServerIP || "Not connected";
 }
