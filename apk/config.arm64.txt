@@ -1,7 +1,0 @@
-{
-    "interaction": {
-        "type": "script",
-        "path": "libfrida-gadget-16.2.1-android-arm64.script.so",
-        "on_change": "reload"
-    }
-}

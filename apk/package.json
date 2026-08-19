@@ -1,9 +1,0 @@
-{
-  "name": "revenge-apk",
-  "version": "1.0.0",
-  "private": true,
-  "description": "REvenge Frida Gadget agent for Brawl Stars Android arm64 (single-file index.js)",
-  "scripts": {
-    "build": "build-arm64.bat"
-  }
-}

@@ -24,7 +24,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-This project targets a third-party application ("BSD Brawl") and modifies
+This project targets a third-party application ("Brawl Stars") and modifies
 its in-process memory at runtime. The use of this software may violate the
 target application's terms of service. The author makes no claim about the
 legality of such use in any jurisdiction. Users assume all responsibility

@@ -12,17 +12,6 @@ Join the Discord or you get nothing: **https://discord.gg/ZksZaUeDbW**
 
 The app is here. This repo is the agent source only.
 
-## APK
-
-`apk/` is **not updated** yet. Still BSD Brawl v67.264. Don't use it on v68.250.
-
-## Repo
-
-```
-agent/   current v68.250 sources
-apk/     old, not updated
-```
-
 ## Build
 
 ```
