@@ -366,13 +366,26 @@ const speedHack = {
             }
             logEvery(80, "speedhack tick",
             {
+                x: pos.x | 0,
+                y: pos.y | 0,
+                tx: target.x,
+                ty: target.y,
                 speed: speed | 0,
                 step: step | 0,
-                dodge: !!dodge
+                tps: this.tps | 0,
+                pending: +this.pending.toFixed(2),
+                dodge: !!dodge,
+                dirX: +dirX.toFixed(3),
+                dirY: +dirY.toFixed(3)
             });
         }
-        catch (_)
-        {}
+        catch (e)
+        {
+            logEvery(40, "speedhack tick error",
+            {
+                err: String(e && e.message || e)
+            });
+        }
     },
 
     fpsCompensate()
@@ -461,7 +474,11 @@ const speedHack = {
             logInfo("speedhack started",
             {
                 intervalMs: this.config.intervalMs,
-                boostTarget: this.config.boostTarget
+                boostTarget: this.config.boostTarget,
+                fpsCompensate: !!this.config.fpsCompensate,
+                drainIntervalMs: this.config.drainIntervalMs,
+                serverThrottleMs: this.config.serverThrottleMs,
+                targetTps: this.config.targetTps
             });
         }
         if (this.config.fpsCompensate && !this.drainTimer)

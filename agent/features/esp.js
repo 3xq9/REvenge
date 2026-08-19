@@ -31,6 +31,7 @@ import
 from "../utils/flags.js";
 import
 {
+    logEvery,
     logInfo,
     logWarn
 }
@@ -195,7 +196,10 @@ function _initGL()
         if (!lib)
         {
             _glFailed = true;
-            logWarn("esp gl init failed");
+            logWarn("esp gl init failed",
+            {
+                reason: "no GLES library"
+            });
             try
             {
                 send(
@@ -226,7 +230,11 @@ function _initGL()
         if (_prog === 0)
         {
             _glFailed = true;
-            logWarn("esp gl init failed");
+            logWarn("esp gl init failed",
+            {
+                reason: "glCreateProgram 0",
+                lib: lib.name
+            });
             try
             {
                 send(
@@ -249,7 +257,13 @@ function _initGL()
         _gl.genBuffers(1, vp);
         _vbo = vp.readU32();
         _glReady = true;
-        logInfo("esp overlay ready");
+        logInfo("esp overlay ready",
+        {
+            lib: lib.name,
+            vbo: _vbo,
+            posLoc: _posLoc,
+            colLoc: _colLoc
+        });
     }
     catch (e)
     {
@@ -749,6 +763,15 @@ export function updateESP()
     _targetCount = tCount;
     _enemyRingCount = rCount;
     _lastUpd = now;
+    logEvery(90, "esp tick",
+    {
+        enemies: enemies.length,
+        drawn: tCount,
+        rings: rCount,
+        self: _selfValid,
+        sw: _sw | 0,
+        sh: _sh | 0
+    });
 }
 export function resetESP()
 {

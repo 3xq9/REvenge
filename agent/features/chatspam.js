@@ -49,7 +49,9 @@ function _sendOnce()
         _mmSendMessage(mm, msg);
         logEvery(10, "chatspam sent",
         {
-            length: text.length
+            length: text.length,
+            intervalMs: options.intervalMs | 0,
+            preview: text.slice(0, 24)
         });
     }
     catch (_)
@@ -113,7 +115,9 @@ export function startChatSpam()
     _startTimer();
     logInfo("chatspam started",
     {
-        intervalMs: options.intervalMs | 0
+        intervalMs: options.intervalMs | 0,
+        length: options.message.length,
+        preview: options.message.slice(0, 24)
     });
     return true;
 }

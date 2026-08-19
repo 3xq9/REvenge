@@ -32,6 +32,7 @@ import
 from "../utils/flags.js";
 import
 {
+    logError,
     logEvery,
     logInfo
 }
@@ -115,7 +116,14 @@ export function updateKillaura(now)
                 lastAttackMs = now;
                 logEvery(20, "killaura attack",
                 {
-                    target: target.gid
+                    target: target.gid,
+                    myX: myX | 0,
+                    myY: myY | 0,
+                    tx: target.x | 0,
+                    ty: target.y | 0,
+                    fireX: fire.fireX | 0,
+                    fireY: fire.fireY | 0,
+                    brawler: scanData.myBrawlerName || ""
                 });
             }
         }
@@ -128,7 +136,12 @@ export function updateKillaura(now)
             logInfo("killaura super",
             {
                 target: target.gid,
-                resolved: !!data
+                resolved: !!data,
+                myX: myX | 0,
+                myY: myY | 0,
+                fireX: fire.fireX | 0,
+                fireY: fire.fireY | 0,
+                brawler: scanData.myBrawlerName || ""
             });
             castSkill(data, myX, myY, fire.fireX, fire.fireY);
         }
@@ -136,12 +149,19 @@ export function updateKillaura(now)
         if (options.useHyper && now - lastHyperMs >= SKILL_THROTTLE_MS)
         {
             lastHyperMs = now;
-            logInfo("killaura hypercharge");
+            logInfo("killaura hypercharge",
+            {
+                brawler: scanData.myBrawlerName || ""
+            });
             activateHypercharge();
         }
     }
-    catch (_)
+    catch (e)
     {
         errorUntil = Date.now() + ERROR_COOLDOWN_MS;
+        logError("killaura tick failed",
+        {
+            err: String(e && e.message || e)
+        });
     }
 }

@@ -307,6 +307,12 @@ function startAgent()
         initScanner(base);
         watchTileChanges(base);
         _setupReady = true;
+        logInfo("agent started",
+        {
+            base: String(base),
+            arch: Process.arch,
+            pointerSize: Process.pointerSize
+        });
         setupEnabledFeatures();
         let lastBM = null;
         Interceptor.attach(base.add(offsets.LogicBattleModeClient_update),
@@ -337,6 +343,10 @@ function startAgent()
                         resetScannerCache();
                         resetLogCounters();
                         notifyBattleModeChanged(bm);
+                        logInfo("battle reset",
+                        {
+                            bm: String(bm)
+                        });
                     }
                     const f = getFlags();
                     const now = Date.now();
@@ -352,14 +362,15 @@ function startAgent()
                     if (f & FLAG_HOLDSHOOT) updateHoldShoot(now);
                     if (f & FLAG_SPEEDHACK) updateSpeedhack(now);
                 }
-                catch (_)
+                catch (e)
                 {
                     try
                     {
                         send(
                         {
                             type: "ERROR",
-                            code: 3
+                            code: 3,
+                            text: `battle tick: ${e && e.message ? e.message : e}`
                         });
                     }
                     catch (__)
@@ -429,7 +440,13 @@ rpc.exports = {
         if (!(feature in state)) return;
         const enabled = !!value;
         setState(feature, enabled);
-        logInfo("toggle " + feature + " = " + enabled);
+        logInfo("toggle " + feature + " = " + enabled,
+        {
+            feature,
+            enabled,
+            flags: getFlags(),
+            module: _moduleByFeature[feature] || null
+        });
         if (enabled && feature === "camera") ensureCameraMode();
         if (enabled) setupFeature(feature);
         const hook = enabled ? _onEnable[feature] : _onDisable[feature];

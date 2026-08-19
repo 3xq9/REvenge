@@ -37,6 +37,7 @@ import
 from "../utils/flags.js";
 import
 {
+    logError,
     logEvery,
     logInfo
 }
@@ -132,7 +133,14 @@ export function updateHoldShoot(now)
                     lastAttackMs = now;
                     logEvery(20, "holdshoot attack",
                     {
-                        target: target.gid
+                        target: target.gid,
+                        myX: myX | 0,
+                        myY: myY | 0,
+                        tx: target.x | 0,
+                        ty: target.y | 0,
+                        fireX: fire.fireX | 0,
+                        fireY: fire.fireY | 0,
+                        rangeCheck: !!options.rangeCheck
                     });
                 }
             }
@@ -146,13 +154,21 @@ export function updateHoldShoot(now)
             logInfo("holdshoot super",
             {
                 target: target.gid,
-                resolved: !!data
+                resolved: !!data,
+                myX: myX | 0,
+                myY: myY | 0,
+                fireX: fire.fireX | 0,
+                fireY: fire.fireY | 0
             });
             castSkill(data, myX, myY, fire.fireX, fire.fireY);
         }
     }
-    catch (_)
+    catch (e)
     {
         errorUntil = Date.now() + ERROR_COOLDOWN_MS;
+        logError("holdshoot tick failed",
+        {
+            err: String(e && e.message || e)
+        });
     }
 }

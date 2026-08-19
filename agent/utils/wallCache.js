@@ -30,6 +30,12 @@ function _validPtr(value)
     return value && !value.isNull();
 }
 
+function ptrFromU32(lo, hi)
+{
+    if (!lo && !hi) return ptr(0);
+    return ptr("0x" + (hi >>> 0).toString(16).padStart(8, "0") + (lo >>> 0).toString(16).padStart(8, "0"));
+}
+
 function _rebuildFrom(tileMap)
 {
     if (!_validPtr(tileMap)) return false;
@@ -55,7 +61,7 @@ function _rebuildFrom(tileMap)
             const lo = view.getUint32(i * pointerSize, true);
             const hi = view.getUint32(i * pointerSize + 4, true);
             if (lo === 0 && hi === 0) continue;
-            const tile = ptr(hi * 4294967296 + lo);
+            const tile = ptrFromU32(lo, hi);
             let tileType;
             try
             {

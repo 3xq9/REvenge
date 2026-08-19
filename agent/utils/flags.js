@@ -67,6 +67,7 @@ export function setupSafe(label, fn)
         const reason = e && e.message ? e.message : String(e);
         logError(label + " setup failed",
         {
+            module: label,
             reason
         });
         try

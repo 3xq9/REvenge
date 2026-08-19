@@ -15,6 +15,7 @@ import
 from "../utils/flags.js";
 import
 {
+    logError,
     logEvery
 }
 from "../utils/logger.js";
@@ -67,11 +68,16 @@ export function updateSpray(now)
         _lastFire = now;
         logEvery(10, "spray sent",
         {
-            slot: SPRAY_SLOT
+            slot: SPRAY_SLOT,
+            intervalMs: _opts.intervalMs | 0
         });
     }
     catch (_)
     {
         _lastFire = now;
+        logError("spray send failed",
+        {
+            err: String(_ && _.message || _)
+        });
     }
 }

@@ -98,10 +98,21 @@ export function setupSpinner(base)
                     if (!target) return;
                     const fns = getFunctions();
                     sendBattleMove(fns.BattleScreen_getLogicBattleModeClient(self), target.x, target.y);
-                    logEvery(80, "spinner tick");
+                    logEvery(80, "spinner tick",
+                    {
+                        x: target.x,
+                        y: target.y,
+                        phase: +_spinPhase.toFixed(3),
+                        dodgeOverride: !!(state.autododge && getDodgeDir())
+                    });
                 }
-                catch (_)
-                {}
+                catch (e)
+                {
+                    logEvery(40, "spinner tick error",
+                    {
+                        err: String(e && e.message || e)
+                    });
+                }
             }
         });
     }

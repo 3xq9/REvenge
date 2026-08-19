@@ -28,9 +28,35 @@ function mappedModule(name)
     {}
     return null;
 }
+
+function mappedFromProc(name)
+{
+    try
+    {
+        const text = File.readAllText("/proc/self/maps");
+        const needle = "/" + name.toLowerCase();
+        for (const line of text.split("\n"))
+        {
+            const path = line.slice(line.lastIndexOf(" ") + 1).trim();
+            if (!path.toLowerCase().endsWith(needle)) continue;
+            const parts = line.split(/\s+/);
+            if (parts.length < 3 || parts[2] !== "00000000") continue;
+            const start = parts[0].split("-")[0];
+            return {
+                name,
+                path,
+                base: ptr("0x" + start),
+                size: 0
+            };
+        }
+    }
+    catch (_)
+    {}
+    return null;
+}
 export function engineModule()
 {
-    return Process.findModuleByName("libg.so") || mappedModule("libg.so");
+    return Process.findModuleByName("libg.so") || mappedModule("libg.so") || mappedFromProc("libg.so");
 }
 export function libg(intervalMs = 50)
 {

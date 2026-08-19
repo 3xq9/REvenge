@@ -90,7 +90,11 @@ function _build()
     _container = container;
     _textField = textField;
     _lastText = null;
-    logInfo("fps label attached");
+    logInfo("fps label attached",
+    {
+        x: _posX | 0,
+        y: _posY | 0
+    });
     return true;
 }
 

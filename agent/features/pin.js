@@ -51,6 +51,7 @@ export function updatePin(now)
     _lastFire = now;
     logEvery(10, "pin sent",
     {
-        pin: EMPTY_PIN_ID
+        pin: EMPTY_PIN_ID,
+        intervalMs: _opts.intervalMs | 0
     });
 }

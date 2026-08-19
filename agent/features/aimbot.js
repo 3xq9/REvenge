@@ -674,7 +674,9 @@ export function setupAimbot(base)
                 {
                     target: enemyId,
                     srcAim: aimActive,
-                    srcKill: killActive
+                    srcKill: killActive,
+                    hasCarryable: !!scanData.hasCarryable,
+                    myTeam: scanData.myTeamId
                 });
             }
             catch (_)
@@ -747,12 +749,21 @@ export function updateAimbot(now)
     }
     if (isLoggingEnabled() && bestTargetId !== prevTargetId)
     {
+        const nextEnemy = bestTargetId ? targets.get(bestTargetId) : null;
         logInfo("aimbot best target changed",
         {
             prev: prevTargetId,
             next: bestTargetId,
             activeEnemies: activeEnemies.length,
-            allEnemies: enemies.length
+            allEnemies: enemies.length,
+            myX: myX | 0,
+            myY: myY | 0,
+            nextX: nextEnemy ? nextEnemy.x | 0 : 0,
+            nextY: nextEnemy ? nextEnemy.y | 0 : 0,
+            nextBrawler: nextEnemy ? nextEnemy.brawlerId : 0,
+            nextHist: nextEnemy ? nextEnemy.samples.length : 0,
+            nextVx: nextEnemy ? +nextEnemy.trackedVx.toFixed(2) : 0,
+            nextVy: nextEnemy ? +nextEnemy.trackedVy.toFixed(2) : 0
         });
     }
     if (bestTargetId !== _burstLockTargetId)

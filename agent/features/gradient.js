@@ -326,7 +326,8 @@ export function setGradientOptions(o)
     logInfo("gradient selected",
     {
         requested: o.name,
-        known: _gradients.size
+        known: _gradients.size,
+        catalog: _names.length
     });
     applyGradientAll();
 }

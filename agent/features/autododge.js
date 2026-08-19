@@ -170,11 +170,16 @@ export function setAutododgeOptions(opts)
     logInfo("autododge tuning",
     {
         ignoredCount: _skip.size,
+        ignored: Array.from(_skip),
         TICK_MS: TUNE.TICK_MS,
         LOCK_MS: TUNE.LOCK_MS,
         DIR_COUNT: TUNE.DIR_COUNT,
         AWARE: TUNE.AWARE,
-        SKIN: TUNE.SKIN
+        SKIN: TUNE.SKIN,
+        REACH: TUNE.REACH,
+        ENGAGE: TUNE.ENGAGE,
+        KEEP_BAND: TUNE.KEEP_BAND,
+        RELEASE_GRACE_MS: TUNE.RELEASE_GRACE_MS
     });
 }
 
@@ -640,10 +645,18 @@ export function updateAutododge()
         {
             threats: hazards.length,
             stayClear: stayClear | 0,
+            myX: myX | 0,
+            myY: myY | 0,
+            speed: speed | 0,
             nx: +chosen.x.toFixed(2),
             ny: +chosen.y.toFixed(2),
+            tx: target.x,
+            ty: target.y,
             score: _scoreBuf[chosenIdx] | 0,
+            stayScore: stayClear | 0,
             reach: TUNE.REACH,
+            idx: chosenIdx,
+            prevIdx,
             committed: chosenIdx === prevIdx,
             sent: ok,
             area: hasBlob,
@@ -658,7 +671,9 @@ export function resetAutododge()
     {
         logInfo("resetAutododge",
         {
-            tracks: _muted.size
+            tracks: _muted.size,
+            heading: !!_heading,
+            headingIdx: _headingIdx
         });
     }
     _muted.clear();

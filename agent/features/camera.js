@@ -89,7 +89,8 @@ export function setupCamera(base)
                     if (!_applied) logInfo("camera mode applied",
                     {
                         mode: _opts.mode | 0,
-                        previous: _defaultMode
+                        previous: _defaultMode,
+                        bs: String(bs)
                     });
                     bs.add(offsets.BattleScreen_cameraMode).writeS32(_opts.mode | 0);
                     _applied = true;
