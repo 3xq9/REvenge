@@ -24,7 +24,7 @@ function reportIp(ip, port)
     const full = ip + ":" + port;
     if (_lastServerIP === full) return;
     _lastServerIP = full;
-    logInfo("server ip captured",
+    logInfo("ipgrabber captured",
     {
         endpoint: full
     });

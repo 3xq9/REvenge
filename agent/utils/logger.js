@@ -1,14 +1,17 @@
 const LEVEL_DEBUG = "debug";
+const LEVEL_INFO = "info";
 const LEVEL_WARN = "warn";
 const LEVEL_ERROR = "error";
 const BATCH_SIZE = 32;
 const FLUSH_DELAY_MS = 100;
 const MAX_PENDING = 512;
+const EVERY_COOLDOWN_MS = 100;
 
 var _enabled = false;
 var _pending = [];
 var _timer = null;
 var _repeatCounts = Object.create(null);
+var _repeatAt = Object.create(null);
 
 function _flush()
 {
@@ -66,6 +69,7 @@ export function setLoggingEnabled(value)
     {
         _flush();
         _repeatCounts = Object.create(null);
+        _repeatAt = Object.create(null);
     }
 }
 
@@ -76,7 +80,7 @@ export function isLoggingEnabled()
 
 export function logInfo(message, data)
 {
-    _push(LEVEL_DEBUG, message, data);
+    _push(LEVEL_INFO, message, data);
 }
 
 export function logWarn(message, data)
@@ -95,10 +99,15 @@ export function logEvery(interval, message, data)
     const key = String(message || "");
     const count = (_repeatCounts[key] || 0) + 1;
     _repeatCounts[key] = count;
-    if (count % (interval | 0 || 1) === 0) _push(LEVEL_DEBUG, message, data);
+    if (count % (interval | 0 || 1) !== 0) return;
+    const now = Date.now();
+    if (now - (_repeatAt[key] || 0) < EVERY_COOLDOWN_MS) return;
+    _repeatAt[key] = now;
+    _push(LEVEL_DEBUG, message, data);
 }
 
 export function resetLogCounters()
 {
     _repeatCounts = Object.create(null);
+    _repeatAt = Object.create(null);
 }

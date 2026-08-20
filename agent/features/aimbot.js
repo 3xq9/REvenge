@@ -32,19 +32,13 @@ import
 from "../core/scstring.js";
 import
 {
-    getDodgeDir
+    leadOf
 }
-from "./autododge.js";
+from "../helpers/aim_lead.js";
 import
 {
-    AIM_TUNING
-}
-from "../utils/config.js";
-import
-{
-    isLoggingEnabled,
-    logInfo,
-    logEvery
+    logEvery,
+    logInfo
 }
 from "../utils/logger.js";
 import
@@ -53,26 +47,18 @@ import
 }
 from "../utils/brawlerName.js";
 
-var LOL_AIMBOT_DEFAULTS = Object.freeze(
-{
-    lastpositionsLen: 6,
-    velocitySmoothing: 0.4,
-    deadzoneSpeed: 150,
-    predictionStrength: 0.8,
-    maxLeadTime: 0.9,
-    jukePredict: Object.freeze(
-    {
-        enabled: true,
-        reactive: true,
-        bias: 0
-    }),
-    curvePredict: Object.freeze(
-    {
-        enabled: true
-    }),
-    projectileSpeed: 4e3
-});
-const BLACKLISTED_SKILLS = new Set([
+var TUNE = {
+    WATCH_MS: 80,
+    STRIDE: 40,
+    FLIGHT_CAP: 1.15,
+    SPEED_PAD: 1.35,
+    LOS_TTL_MS: 100,
+    LOS_PURGE_MS: 500,
+    FALLBACK_SPEED: 4000,
+    FALLBACK_RADIUS: 300,
+    CACHE_MS: 250
+};
+const SKIP_SKILLS = new Set([
     "ShamanUlti", "MechanicUlti", "ClusterBombDudeUlti", "ArcadeUlti", "ArtilleryDudeUlti",
     "SoulCollectorUlti", "MinigunDudeUlti", "KnightUlti", "DuplicatorUlti", "TwinsUlti",
     "SpawnerDudeUlti", "ConductorUlti", "MeepleUlti", "FleaUlti", "ReviverUlti", "VoodooUlti",
@@ -80,18 +66,68 @@ const BLACKLISTED_SKILLS = new Set([
     "DoorManUlti", "ConductorUltiSpawn"
 ]);
 
-function isBlacklistedSkill(name)
+var _live = new Map();
+var bestPtr = null;
+var bestGid = null;
+var _scrubTs = 0;
+var _losMemo = new Map();
+var _cacheTs = 0;
+var _hyper = -1;
+var _slots = {
+    attack: null,
+    super: null,
+    gadget: null
+};
+var _shots = {
+    attack: null,
+    super: null,
+    gadget: null
+};
+var _pendingLog = null;
+var _opts = {
+    onManualAim: true,
+    onAutoshoot: true,
+    useSuper: true,
+    allowGadget: true,
+    allowPlayers: true,
+    allowSpawnables: true
+};
+var _superSet = new Set();
+
+export function setAimbotOptions(o)
 {
-    return !!name && BLACKLISTED_SKILLS.has(name);
+    if (!o || typeof o !== "object") return;
+    if (typeof o.onManualAim === "boolean") _opts.onManualAim = o.onManualAim;
+    if (typeof o.onAutoshoot === "boolean") _opts.onAutoshoot = o.onAutoshoot;
+    if (typeof o.useSuper === "boolean") _opts.useSuper = o.useSuper;
+    if (typeof o.allowGadget === "boolean") _opts.allowGadget = o.allowGadget;
+    if (typeof o.allowPlayers === "boolean") _opts.allowPlayers = o.allowPlayers;
+    if (typeof o.allowSpawnables === "boolean") _opts.allowSpawnables = o.allowSpawnables;
+    if (Array.isArray(o.superBrawlers))
+    {
+        _superSet = new Set();
+        for (const name of o.superBrawlers)
+        {
+            const id = canonBrawlerName(name);
+            if (id) _superSet.add(id);
+        }
+    }
 }
 
-function _skillName(skillData)
+function _superOk(name)
+{
+    if (_superSet.size === 0) return true;
+    return !!name && _superSet.has(name);
+}
+
+function _dataName(data)
 {
     const fns = getFunctions();
-    if (!fns.LogicData_getName) return null;
+    if (!fns.LogicData_getName || !data) return null;
     try
     {
-        return readScString(fns.LogicData_getName(skillData), 64);
+        if (data.isNull()) return null;
+        return readScString(fns.LogicData_getName(data), 64);
     }
     catch (_)
     {
@@ -99,115 +135,119 @@ function _skillName(skillData)
     }
 }
 
-function _firedSkillSpeed(skillClient)
+function _selfName()
+{
+    return scanData.myBrawlerName;
+}
+
+function _same(a, b)
+{
+    if (!a || !b) return false;
+    try
+    {
+        return !a.isNull() && !b.isNull() && a.equals(b);
+    }
+    catch (_)
+    {
+        return false;
+    }
+}
+
+function _slotPtr(own, slot)
 {
     try
     {
         const fns = getFunctions();
-        if (!skillClient || skillClient.isNull() || !fns.LogicSkillClient_getData) return {
-            blacklisted: false,
-            ulti: false,
-            speed: 0
+        if (!fns.LogicCharacterClient_getSkillAt || !own || own.isNull()) return null;
+        const skill = fns.LogicCharacterClient_getSkillAt(own, slot);
+        return skill && !skill.isNull() ? skill : null;
+    }
+    catch (_)
+    {
+        return null;
+    }
+}
+
+function _emptyShot()
+{
+    return {
+        skip: false,
+        kind: "attack",
+        reach: 0,
+        vel: TUNE.FALLBACK_SPEED,
+        rad: TUNE.FALLBACK_RADIUS,
+        loft: !!scanData.throwsOverWalls,
+        live: false,
+        name: null
+    };
+}
+
+function _shotOf(skill)
+{
+    const empty = _emptyShot();
+    if (!skill || skill.isNull()) return empty;
+    try
+    {
+        const fns = getFunctions();
+        const name = _dataName(skill);
+        if (name && SKIP_SKILLS.has(name)) return {
+            skip: true,
+            kind: "attack",
+            reach: 0,
+            vel: 0,
+            rad: TUNE.FALLBACK_RADIUS,
+            loft: false,
+            live: false,
+            name
         };
-        let hyper = 0;
-        try
+        let reach = 0;
+        if (fns.LogicSkillData_getCastingRange)
         {
-            const own = scanData.ownCharacter;
-            if (own && !own.isNull()) hyper = own.add(offsets.LogicCharacterClient_hyperActive).readU8() !== 0 ? 1 : 0;
+            const tiles = fns.LogicSkillData_getCastingRange(skill) | 0;
+            if (tiles > 0) reach = tiles * 100;
         }
-        catch (_)
-        {}
-        const skillData = fns.LogicSkillClient_getData(skillClient, hyper);
-        if (!skillData || skillData.isNull()) return {
-            blacklisted: false,
-            ulti: false,
-            speed: 0
-        };
-        const name = _skillName(skillData);
-        const ulti = !!name && name.indexOf("Ulti") !== -1;
-        if (isBlacklistedSkill(name)) return {
-            blacklisted: true,
-            ulti,
-            speed: 0
-        };
-        if (!fns.LogicSkillData_getProjectileData) return {
-            blacklisted: false,
-            ulti,
-            speed: 0
-        };
-        const projectile = fns.LogicSkillData_getProjectileData(skillData, 0);
-        if (!projectile || projectile.isNull()) return {
-            blacklisted: false,
-            ulti,
-            speed: 0
-        };
+        let vel = 0;
+        let rad = TUNE.FALLBACK_RADIUS;
+        let loft = !!scanData.throwsOverWalls;
+        if (fns.LogicSkillData_getProjectileData)
+        {
+            const projectile = fns.LogicSkillData_getProjectileData(skill, 0);
+            if (projectile && !projectile.isNull())
+            {
+                vel = fns.LogicProjectileData_getSpeed(projectile) | 0;
+                if (fns.LogicProjectileData_getRadius) rad = fns.LogicProjectileData_getRadius(projectile) | 0;
+                if (rad <= 0) rad = TUNE.FALLBACK_RADIUS;
+                try
+                {
+                    loft = (projectile.add(offsets.Projectile_isIndirect).readU32() | 0) !== 0;
+                }
+                catch (_)
+                {}
+            }
+        }
         return {
-            blacklisted: false,
-            ulti,
-            speed: fns.LogicProjectileData_getSpeed(projectile) | 0
+            skip: false,
+            kind: "attack",
+            reach,
+            vel: vel > 0 ? vel : TUNE.FALLBACK_SPEED,
+            rad,
+            loft,
+            live: vel > 0,
+            name
         };
     }
     catch (_)
     {
-        return {
-            blacklisted: false,
-            ulti: false,
-            speed: 0
-        };
+        return empty;
     }
 }
 
-var targets = new Map();
-var bestTargetId = null;
-var _lastCleanupTs = 0;
-var _burstLockPos = null;
-var _burstLockUntil = 0;
-var _burstLockTargetId = null;
-var _burstLockTgtX = null;
-var _burstLockTgtY = null;
-var _losCache = new Map();
-var _opts = {
-    onManualAim: true,
-    onAutoshoot: true,
-    useSuper: true
-};
-var _superBrawlersSet = new Set();
-export function setAimbotOptions(o)
-{
-    if (!o || typeof o !== "object") return;
-    if (typeof o.onManualAim === "boolean") _opts.onManualAim = o.onManualAim;
-    if (typeof o.onAutoshoot === "boolean") _opts.onAutoshoot = o.onAutoshoot;
-    if (typeof o.useSuper === "boolean") _opts.useSuper = o.useSuper;
-    if (Array.isArray(o.superBrawlers))
-    {
-        _superBrawlersSet = new Set();
-        for (const name of o.superBrawlers)
-        {
-            const id = canonBrawlerName(name);
-            if (id) _superBrawlersSet.add(id);
-        }
-    }
-}
-
-function _superAllowed(name)
-{
-    if (_superBrawlersSet.size === 0) return true;
-    return !!name && _superBrawlersSet.has(name);
-}
-
-function _ownRange()
+function _readHyper(own)
 {
     try
     {
-        const own = scanData.ownCharacter;
         if (!own || own.isNull()) return 0;
-        const fns = getFunctions();
-        if (!fns.LogicCharacterClient_getWeaponSkill || !fns.LogicSkillData_getCastingRange) return 0;
-        const skill = fns.LogicCharacterClient_getWeaponSkill(own);
-        if (!skill || skill.isNull()) return 0;
-        const tiles = fns.LogicSkillData_getCastingRange(skill) | 0;
-        if (tiles <= 0) return 0;
-        return tiles * 100;
+        return own.add(offsets.LogicCharacterClient_hyperActive).readU8() !== 0 ? 1 : 0;
     }
     catch (_)
     {
@@ -215,411 +255,309 @@ function _ownRange()
     }
 }
 
-function pickBestTarget(enemies, myX, myY, prevGid, range)
+function _shotFromClient(client, hyper)
 {
-    const wDist = AIM_TUNING.SCORE_DIST_WEIGHT;
-    const wSpeed = AIM_TUNING.SCORE_SPEED_WEIGHT;
-    const wApproach = AIM_TUNING.SCORE_APPROACH_WEIGHT;
-    const wFacing = AIM_TUNING.SCORE_FACING_WEIGHT;
-    const sticky = AIM_TUNING.TARGET_STICKY_RATIO;
-    const statFloor = AIM_TUNING.STATIONARY_VEL_FLOOR;
-    const statRatio = AIM_TUNING.STATIONARY_VEL_RATIO;
-    const defMove = AIM_TUNING.DEFAULT_MOVE_SPEED;
-    let bestGid = 0;
-    let bestScore = 1e18;
-    let prevScore = 1e18;
-    let prevFound = false;
-    const n = enemies.length;
-    for (let i = 0; i < n; i++)
+    try
     {
-        const e = enemies[i];
-        if (!e.losClear) continue;
-        const vx = e.vxEma;
-        const vy = e.vyEma;
-        const speed = Math.sqrt(vx * vx + vy * vy);
-        const dx = e.x - myX;
-        const dy = e.y - myY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const invD = 1 / (dist + 1e-6);
-        const approach = -(dx * vx + dy * vy) * invD;
-        let facing = 0;
-        const move = e.moveSpeed > 0 ? e.moveSpeed : defMove;
-        const thr = statFloor > move * statRatio ? statFloor : move * statRatio;
-        if (speed > thr)
-        {
-            const maxSp = speed > 1 ? speed : 1;
-            facing = (-dx * vx - dy * vy) * invD / maxSp;
-        }
-        let score = dist * wDist - speed * wSpeed - approach * wApproach - facing * wFacing * dist;
-        if (range > 0 && dist > range) score += (dist - range) * 3;
-        const gidInt = e.gidInt;
-        if (prevGid !== 0 && gidInt === prevGid)
-        {
-            prevScore = score;
-            prevFound = true;
-        }
-        if (score < bestScore)
-        {
-            bestScore = score;
-            bestGid = gidInt;
-        }
+        const fns = getFunctions();
+        if (!client || client.isNull() || !fns.LogicSkillClient_getData) return _emptyShot();
+        return _shotOf(fns.LogicSkillClient_getData(client, hyper));
     }
-    if (prevFound && bestGid !== prevGid && prevScore <= bestScore / sticky)
+    catch (_)
     {
-        bestGid = prevGid;
+        return _emptyShot();
     }
-    return bestGid;
-}
-export function resetAimbot()
-{
-    targets.clear();
-    bestTargetId = null;
-    _lastCleanupTs = 0;
-    _burstLockPos = null;
-    _burstLockUntil = 0;
-    _burstLockTargetId = null;
-    _burstLockTgtX = null;
-    _burstLockTgtY = null;
-    _losCache.clear();
-    _projSpeedCache.brawlerId = -1;
-    _projSpeedCache.speed = 0;
 }
 
-function _clamp(v, lo, hi)
+function _copyShot(shot, kind)
 {
-    return Math.max(lo, Math.min(hi, v));
-}
-
-function _regress(samples)
-{
-    const n = samples.length;
-    if (n < 2) return null;
-    let st = 0,
-        sx = 0,
-        sy = 0;
-    for (let i = 0; i < n; i++)
-    {
-        st += samples[i].t;
-        sx += samples[i].x;
-        sy += samples[i].y;
-    }
-    const mt = st / n,
-        mx = sx / n,
-        my = sy / n;
-    let denom = 0,
-        tx = 0,
-        ty = 0;
-    for (let i = 0; i < n; i++)
-    {
-        const dt = (samples[i].t - mt) / 1e3;
-        denom += dt * dt;
-        tx += dt * (samples[i].x - mx);
-        ty += dt * (samples[i].y - my);
-    }
-    if (denom < 1e-8) return null;
+    const src = shot || _emptyShot();
     return {
-        vx: tx / denom,
-        vy: ty / denom
+        skip: !!src.skip,
+        kind: kind || src.kind || "attack",
+        reach: src.reach || 0,
+        vel: src.vel || TUNE.FALLBACK_SPEED,
+        rad: src.rad || TUNE.FALLBACK_RADIUS,
+        loft: !!src.loft,
+        live: !!src.live,
+        name: src.name || null
     };
 }
 
-function estimateAcceleration(samples)
+function _cacheShots(now)
 {
-    if (samples.length < 4) return {
-        ax: 0,
-        ay: 0
-    };
-    const mid = Math.floor(samples.length / 2);
-    const early = _regress(samples.slice(0, mid + 1));
-    const late = _regress(samples.slice(mid));
-    if (!early || !late) return {
-        ax: 0,
-        ay: 0
-    };
-    const tEarly = (samples[0].t + samples[mid].t) / 2;
-    const tLate = (samples[mid].t + samples[samples.length - 1].t) / 2;
-    const dt = (tLate - tEarly) / 1e3;
-    if (dt <= 1e-6) return {
-        ax: 0,
-        ay: 0
-    };
-    let ax = (late.vx - early.vx) / dt;
-    let ay = (late.vy - early.vy) / dt;
-    const speed = Math.hypot(early.vx + late.vx, early.vy + late.vy) * 0.5;
-    const maxAccel = speed * 8;
-    const accel = Math.hypot(ax, ay);
-    if (accel > maxAccel && accel > 1e-6)
+    const own = scanData.ownCharacter;
+    const hyper = _readHyper(own);
+    if (now - _cacheTs < TUNE.CACHE_MS && hyper === _hyper && _shots.attack) return;
+    _cacheTs = now;
+    _hyper = hyper;
+    if (!own || own.isNull()) return;
+    try
     {
-        const scale = maxAccel / accel;
-        ax *= scale;
-        ay *= scale;
+        const fns = getFunctions();
+        _slots.attack = _slotPtr(own, 0);
+        _slots.super = _slotPtr(own, 1);
+        _slots.gadget = _slotPtr(own, 2);
+        if (!_slots.gadget) _slots.gadget = _slotPtr(own, 5);
+        const weapon = fns.LogicCharacterClient_getWeaponSkill ? fns.LogicCharacterClient_getWeaponSkill(own) : null;
+        _shots.attack = weapon && !weapon.isNull() ? _shotOf(weapon) : _shotFromClient(_slots.attack, hyper);
+        _shots.super = _shotFromClient(_slots.super, hyper);
+        _shots.gadget = _shotFromClient(_slots.gadget, hyper);
+        if (_shots.attack) _shots.attack.kind = "attack";
+        if (_shots.super) _shots.super.kind = "super";
+        if (_shots.gadget) _shots.gadget.kind = "gadget";
     }
-    return {
-        ax,
-        ay
-    };
+    catch (_)
+    {}
 }
 
-function updateLolTracking(t, x, y, now)
+function _shotForClient(client)
 {
-    t.samples.push(
+    if (client && !client.isNull())
     {
-        x,
-        y,
-        t: now
-    });
-    while (t.samples.length > LOL_AIMBOT_DEFAULTS.lastpositionsLen) t.samples.shift();
-    if (t.samples.length < 2)
-    {
-        t.trackedVx = 0;
-        t.trackedVy = 0;
-        t.trackedAx = 0;
-        return t;
+        if (_same(client, _slots.super)) return _copyShot(_shots.super, "super");
+        if (_same(client, _slots.gadget)) return _copyShot(_shots.gadget, "gadget");
     }
-    const fit = _regress(t.samples);
-    if (!fit) return t;
-    const recent = _regress(t.samples.slice(-Math.min(3, t.samples.length))) || fit;
-    const dot = recent.vx * t.prevVx + recent.vy * t.prevVy;
-    const recentSpeed = Math.hypot(recent.vx, recent.vy);
-    const reversal = LOL_AIMBOT_DEFAULTS.jukePredict.enabled && LOL_AIMBOT_DEFAULTS.jukePredict.reactive && dot < 0;
-    if (!t.haveVelocity || reversal || recentSpeed > LOL_AIMBOT_DEFAULTS.deadzoneSpeed && Math.hypot(t.prevVx, t.prevVy) < LOL_AIMBOT_DEFAULTS.deadzoneSpeed)
-    {
-        t.trackedVx = recent.vx;
-        t.trackedVy = recent.vy;
-        t.haveVelocity = true;
-    }
-    else
-    {
-        const k = _clamp(LOL_AIMBOT_DEFAULTS.velocitySmoothing, 0, 0.95);
-        t.trackedVx = t.trackedVx * k + fit.vx * (1 - k);
-        t.trackedVy = t.trackedVy * k + fit.vy * (1 - k);
-    }
-    t.prevVx = t.trackedVx;
-    t.prevVy = t.trackedVy;
-    if (LOL_AIMBOT_DEFAULTS.curvePredict.enabled)
-    {
-        const acc = estimateAcceleration(t.samples);
-        t.trackedAx = acc.ax;
-        t.trackedAy = acc.ay;
-    }
-    else
-    {
-        t.trackedAx = 0;
-        t.trackedAy = 0;
-    }
-    return t;
+    return _copyShot(_shots.attack, "attack");
 }
 
-function hasLineOfSight(x0, y0, x1, y1)
+function _bearing(ax, ay, bx, by)
+{
+    return (Math.atan2(by - ay, bx - ax) * 180 / Math.PI + 360) % 360;
+}
+
+function _sight(x0, y0, x1, y1)
 {
     const tx0 = x0 / TILE_SIZE | 0,
-        ty0 = y0 / TILE_SIZE | 0;
-    const tx1 = x1 / TILE_SIZE | 0,
+        ty0 = y0 / TILE_SIZE | 0,
+        tx1 = x1 / TILE_SIZE | 0,
         ty1 = y1 / TILE_SIZE | 0;
     const key = (tx0 & 127) << 21 | (ty0 & 127) << 14 | (tx1 & 127) << 7 | ty1 & 127 | 0;
     const now = Date.now();
-    const cached = _losCache.get(key);
-    if (cached !== void 0 && now - cached.ts < AIM_TUNING.LOS_CACHE_TTL_MS) return cached.v;
+    const hit = _losMemo.get(key);
+    if (hit !== void 0 && now - hit.ts < TUNE.LOS_TTL_MS) return hit.v;
     const v = losCheck(x0, y0, x1, y1, BLOCKS_PROJECTILES);
-    _losCache.set(key,
+    _losMemo.set(key,
     {
         v,
         ts: now
     });
     return v;
 }
-var _projSpeedCache = {
-    brawlerId: -1,
-    speed: 0
-};
 
-function _readOwnProjSpeedRuntime()
+function _motion(row, x, y, now)
 {
-    try
+    if (!row.markTs)
     {
-        const own = scanData.ownCharacter;
-        if (!own || own.isNull()) return 0;
-        const fns = getFunctions();
-        const skill = fns.LogicCharacterClient_getWeaponSkill(own);
-        if (!skill || skill.isNull()) return 0;
-        const projData = fns.LogicSkillData_getProjectileData(skill, 0);
-        if (!projData || projData.isNull()) return 0;
-        const speed = fns.LogicProjectileData_getSpeed(projData);
-        if (speed >= 500 && speed <= 15e3) return speed >>> 0;
+        row.markTs = now;
+        row.markX = x;
+        row.markY = y;
+        row.spd = 0;
+        return;
     }
-    catch (_)
-    {}
-    return 0;
-}
-
-function resolveProjSpeed()
-{
-    const bid = scanData.myBrawlerId | 0;
-    if (bid === _projSpeedCache.brawlerId && _projSpeedCache.speed > 0)
+    const dt = now - row.markTs;
+    if (dt < TUNE.WATCH_MS) return;
+    const dx = x - row.markX;
+    const dy = y - row.markY;
+    const gone = Math.hypot(dx, dy);
+    if (gone >= TUNE.STRIDE)
     {
-        return _projSpeedCache.speed;
-    }
-    const s = _readOwnProjSpeedRuntime();
-    if (s > 0)
-    {
-        _projSpeedCache.brawlerId = bid;
-        _projSpeedCache.speed = s;
-        return s;
-    }
-    return 0;
-}
-export function computeAimForTarget(targetId, ownX, ownY, projSpeedOverride)
-{
-    const tgt = targets.get(targetId);
-    if (!tgt)
-    {
-        logEvery(30, "aimbot no target in map",
+        let spd = gone / (dt / 1000);
+        if (!(row.gait > 0)) spd = 0;
+        else
         {
-            targetId,
-            mapSize: targets.size
-        });
-        return null;
-    }
-    if (tgt.samples.length < 1)
-    {
-        logEvery(30, "aimbot not enough history",
-        {
-            targetId,
-            hist: tgt.samples.length
-        });
-        return null;
-    }
-    const projSpeed = projSpeedOverride > 0 ? projSpeedOverride : resolveProjSpeed();
-    const speed = Math.hypot(tgt.trackedVx, tgt.trackedVy);
-    if (projSpeed <= 0 || speed < LOL_AIMBOT_DEFAULTS.deadzoneSpeed)
-    {
-        return {
-            x: Math.round(tgt.x),
-            y: Math.round(tgt.y),
-            mode: "LOL_STABLE"
-        };
-    }
-    const strength = LOL_AIMBOT_DEFAULTS.predictionStrength;
-    const vx = tgt.trackedVx * strength;
-    const vy = tgt.trackedVy * strength;
-    const ax = tgt.trackedAx * strength;
-    const ay = tgt.trackedAy * strength;
-    let lead = Math.hypot(tgt.x - ownX, tgt.y - ownY) / projSpeed;
-    for (let i = 0; i < 6; i++)
-    {
-        const px = tgt.x + vx * lead + 0.5 * ax * lead * lead;
-        const py = tgt.y + vy * lead + 0.5 * ay * lead * lead;
-        const next = Math.hypot(px - ownX, py - ownY) / projSpeed;
-        lead = _clamp(next, 0, LOL_AIMBOT_DEFAULTS.maxLeadTime);
-    }
-    let aimX = tgt.x + vx * lead + 0.5 * ax * lead * lead;
-    let aimY = tgt.y + vy * lead + 0.5 * ay * lead * lead;
-    const bias = _clamp(LOL_AIMBOT_DEFAULTS.jukePredict.bias, 0, 1);
-    if (LOL_AIMBOT_DEFAULTS.jukePredict.enabled && bias > 0)
-    {
-        let reverseLead = Math.hypot(tgt.x - ownX, tgt.y - ownY) / projSpeed;
-        for (let i = 0; i < 6; i++)
-        {
-            const px = tgt.x - vx * reverseLead;
-            const py = tgt.y - vy * reverseLead;
-            reverseLead = _clamp(Math.hypot(px - ownX, py - ownY) / projSpeed, 0, LOL_AIMBOT_DEFAULTS.maxLeadTime);
+            const cap = row.gait * TUNE.SPEED_PAD;
+            if (spd > cap) spd = cap;
         }
-        const reverseX = tgt.x - vx * reverseLead;
-        const reverseY = tgt.y - vy * reverseLead;
-        aimX = aimX * (1 - bias) + reverseX * bias;
-        aimY = aimY * (1 - bias) + reverseY * bias;
+        row.spd = spd;
+        if (spd > 0) row.yaw = _bearing(row.markX, row.markY, x, y);
     }
-    if (!isFinite(aimX) || !isFinite(aimY)) return null;
+    else
+    {
+        row.spd = 0;
+    }
+    row.markTs = now;
+    row.markX = x;
+    row.markY = y;
+}
+
+function _point(ox, oy, row, shot, lead)
+{
+    if (!row) return null;
+    let x = row.x;
+    let y = row.y;
+    if (shot && shot.live && shot.vel > 0 && lead > 0 && row.spd > 0 && row.gait > 0)
+    {
+        const vel = shot.vel;
+        const scale = lead / 100;
+        let flight = Math.hypot(row.x - ox, row.y - oy) / vel;
+        const pocket = (row.rad || 0) + (shot.rad || 0);
+        if (row.spd * flight > pocket)
+        {
+            const rad = row.yaw * Math.PI / 180;
+            const ux = Math.cos(rad);
+            const uy = Math.sin(rad);
+            for (let i = 0; i < 3; i++)
+            {
+                flight = Math.hypot(x - ox, y - oy) / vel;
+                if (flight > TUNE.FLIGHT_CAP) flight = TUNE.FLIGHT_CAP;
+                x = row.x + ux * row.spd * flight * scale;
+                y = row.y + uy * row.spd * flight * scale;
+            }
+            if (!isFinite(x) || !isFinite(y))
+            {
+                x = row.x;
+                y = row.y;
+            }
+        }
+    }
+    const reach = shot && shot.reach > 0 ? shot.reach : 0;
+    if (reach > 0)
+    {
+        const dx = x - ox;
+        const dy = y - oy;
+        const dist = Math.hypot(dx, dy);
+        const max = reach + (row.rad || 0);
+        if (dist > max && dist > 1)
+        {
+            x = ox + dx * max / dist;
+            y = oy + dy * max / dist;
+        }
+    }
     return {
-        x: Math.round(aimX),
-        y: Math.round(aimY),
-        mode: "LOL_INTERCEPT"
+        x: Math.round(x),
+        y: Math.round(y)
     };
 }
 
-function _writeAimArgs(args, aim)
+function _accept(tag)
+{
+    if (tag === "prop") return _opts.allowSpawnables;
+    return _opts.allowPlayers;
+}
+
+function _nearest(ox, oy, shot)
+{
+    let foe = null;
+    let foeCost = 1 / 0;
+    let prop = null;
+    let propCost = 1 / 0;
+    const loft = !!(shot && (shot.loft || scanData.throwsOverWalls));
+    const reach = shot && shot.reach > 0 ? shot.reach : 0;
+    for (const row of _live.values())
+    {
+        if (!_accept(row.tag)) continue;
+        const dist = Math.hypot(row.x - ox, row.y - oy);
+        if (reach > 0 && dist > reach + (row.rad || 0)) continue;
+        if (!loft && !_sight(ox, oy, row.x, row.y)) continue;
+        if (row.tag === "prop")
+        {
+            if (dist < propCost)
+            {
+                propCost = dist;
+                prop = row;
+            }
+        }
+        else if (dist < foeCost)
+        {
+            foeCost = dist;
+            foe = row;
+        }
+    }
+    return foe || prop;
+}
+
+function _closest(ox, oy)
+{
+    let foe = null;
+    let foeCost = 1 / 0;
+    let prop = null;
+    let propCost = 1 / 0;
+    for (const row of _live.values())
+    {
+        if (!_accept(row.tag)) continue;
+        const dist = Math.hypot(row.x - ox, row.y - oy);
+        if (row.tag === "prop")
+        {
+            if (dist < propCost)
+            {
+                propCost = dist;
+                prop = row;
+            }
+        }
+        else if (dist < foeCost)
+        {
+            foeCost = dist;
+            foe = row;
+        }
+    }
+    return foe || prop;
+}
+
+function _aim(ox, oy, shot)
+{
+    const row = _nearest(ox, oy, shot);
+    if (!row) return null;
+    const at = _point(ox, oy, row, shot, leadOf(_selfName()));
+    if (!at) return null;
+    return {
+        id: row.gid,
+        ptr: row.ptr,
+        x: at.x,
+        y: at.y
+    };
+}
+
+function _putAim(args, aim)
 {
     args[1] = ptr(aim.x);
     args[2] = ptr(aim.y);
 }
 
-function _shooterPos()
+function _kindOk(kind)
 {
-    const dodge = getDodgeDir();
-    const mySpd = scanData.mySpeed || AIM_TUNING.DEFAULT_MOVE_SPEED;
-    return {
-        x: scanData.myX + (dodge ? dodge.x * mySpd * AIM_TUNING.SHOOT_LAG_S : 0),
-        y: scanData.myY + (dodge ? dodge.y * mySpd * AIM_TUNING.SHOOT_LAG_S : 0)
-    };
+    if (kind === "super") return _opts.useSuper && _superOk(scanData.myBrawlerName);
+    if (kind === "gadget") return _opts.allowGadget;
+    return true;
 }
 
-function _aimAttack(args, enemyId, speed)
+export function resetAimbot()
 {
-    const from = _shooterPos();
-    const aim = computeAimForTarget(enemyId, from.x, from.y, speed);
-    if (!aim) return;
-    if (!scanData.throwsOverWalls && !hasLineOfSight(scanData.myX, scanData.myY, aim.x, aim.y)) return;
-    try
-    {
-        _writeAimArgs(args, aim);
-    }
-    catch (_)
-    {}
+    _live.clear();
+    bestPtr = null;
+    bestGid = null;
+    _scrubTs = 0;
+    _cacheTs = 0;
+    _hyper = -1;
+    _slots.attack = null;
+    _slots.super = null;
+    _slots.gadget = null;
+    _shots.attack = null;
+    _shots.super = null;
+    _shots.gadget = null;
+    _pendingLog = null;
+    _losMemo.clear();
 }
 
-function _aimSuper(args, enemyId)
+export function computeAimForTarget(targetId, ownX, ownY, projSpeedOverride)
 {
-    const nowMs = Date.now();
-    if (_burstLockPos && _burstLockTargetId === enemyId && nowMs < _burstLockUntil)
+    const row = _live.get(targetId);
+    if (!row)
     {
-        const tgtNow = targets.get(enemyId);
-        let drifted = false;
-        if (tgtNow && _burstLockTgtX !== null)
+        logEvery(30, "aimbot no target in map",
         {
-            const ddx = tgtNow.x - _burstLockTgtX;
-            const ddy = tgtNow.y - _burstLockTgtY;
-            if (ddx * ddx + ddy * ddy > AIM_TUNING.BURST_LOCK_MAX_DRIFT * AIM_TUNING.BURST_LOCK_MAX_DRIFT) drifted = true;
-        }
-        if (!drifted)
-        {
-            try
-            {
-                _writeAimArgs(args, _burstLockPos);
-            }
-            catch (_)
-            {}
-            return;
-        }
+            targetId,
+            mapSize: _live.size
+        });
+        return null;
     }
-    const from = _shooterPos();
-    const aim = computeAimForTarget(enemyId, from.x, from.y);
-    if (!aim) return;
-    if (!scanData.throwsOverWalls && !hasLineOfSight(scanData.myX, scanData.myY, aim.x, aim.y)) return;
-    _burstLockPos = aim;
-    _burstLockTargetId = enemyId;
-    _burstLockUntil = nowMs + AIM_TUNING.BURST_LOCK_MS;
-    const lockTgt = targets.get(enemyId);
-    if (lockTgt)
+    const shot = _copyShot(_shots.attack, "attack");
+    if (projSpeedOverride > 0)
     {
-        _burstLockTgtX = lockTgt.x;
-        _burstLockTgtY = lockTgt.y;
+        shot.vel = projSpeedOverride;
+        shot.live = true;
     }
-    try
-    {
-        _writeAimArgs(args, aim);
-    }
-    catch (_)
-    {}
-}
-
-function _enemyPtr(enemyId)
-{
-    const enemies = scanData.enemies || [];
-    for (let i = 0; i < enemies.length; i++)
-    {
-        if (enemies[i].gid === enemyId) return enemies[i].ptr || null;
-    }
-    return null;
+    return _point(ownX, ownY, row, shot, leadOf(_selfName()));
 }
 
 export function setupAimbot(base)
@@ -631,16 +569,9 @@ export function setupAimbot(base)
             if (!state.aimbot) return;
             if (scanData.hasCarryable) return;
             if (scanData.lastUpdate === 0) return;
-            const enemyId = bestTargetId;
-            if (!enemyId || !targets.has(enemyId)) return;
-            const fired = _firedSkillSpeed(args[4]);
-            if (fired.blacklisted) return;
-            if (fired.ulti)
-            {
-                if (!_opts.useSuper || !_superAllowed(scanData.myBrawlerName)) return;
-                _aimSuper(args, enemyId);
-                return;
-            }
+            const shot = _shotForClient(args[4]);
+            if (shot.skip) return;
+            if (!_kindOk(shot.kind)) return;
             let targetId = 0;
             try
             {
@@ -650,8 +581,28 @@ export function setupAimbot(base)
             {}
             const manual = _opts.onManualAim && targetId === 0;
             const auto = _opts.onAutoshoot && targetId !== 0;
-            if (!manual && !auto) return;
-            _aimAttack(args, enemyId, fired.speed);
+            if (shot.kind === "attack" && !manual && !auto) return;
+            if (shot.kind === "super" && !_opts.onManualAim && !_opts.onAutoshoot) return;
+            const ox = scanData.myX;
+            const oy = scanData.myY;
+            const aim = _aim(ox, oy, shot);
+            if (!aim) return;
+            bestPtr = aim.ptr || null;
+            bestGid = aim.id || null;
+            _putAim(args, aim);
+            _pendingLog = {
+                id: aim.id,
+                x: aim.x,
+                y: aim.y,
+                myX: ox | 0,
+                myY: oy | 0,
+                dist: Math.hypot(aim.x - ox, aim.y - oy) | 0,
+                kind: shot.kind,
+                vel: shot.vel | 0,
+                reach: shot.reach | 0,
+                live: !!shot.live,
+                lead: leadOf(_selfName())
+            };
         }
     });
     Interceptor.attach(base.add(offsets.BattleScreen_getClosestTargetForAutoshoot),
@@ -663,126 +614,88 @@ export function setupAimbot(base)
             if (!aimActive && !killActive) return;
             if (scanData.hasCarryable) return;
             if (scanData.lastUpdate === 0) return;
-            const enemyId = bestTargetId;
-            if (!enemyId || !targets.has(enemyId)) return;
-            const enemyPtr = _enemyPtr(enemyId);
-            if (!enemyPtr || enemyPtr.isNull()) return;
+            if (!bestGid) return;
+            const row = _live.get(bestGid);
+            if (!row || !row.ptr) return;
             try
             {
-                retval.replace(enemyPtr);
-                logEvery(120, "aimbot autoshoot override",
-                {
-                    target: enemyId,
-                    srcAim: aimActive,
-                    srcKill: killActive,
-                    hasCarryable: !!scanData.hasCarryable,
-                    myTeam: scanData.myTeamId
-                });
+                if (row.ptr.isNull()) return;
+                bestPtr = row.ptr;
+                retval.replace(bestPtr);
             }
             catch (_)
             {}
         }
     });
 }
+
 export function updateAimbot(now)
 {
     if (!state.aimbot && !state.killaura || scanData.lastUpdate === 0) return;
-    const myX = scanData.myX,
-        myY = scanData.myY;
     if (now === void 0) now = Date.now();
-    const prevTargetId = bestTargetId;
-    bestTargetId = null;
+    const seen = new Set();
     const enemies = scanData.enemies || [];
-    const activeEnemies = [];
     for (let i = 0; i < enemies.length; i++)
     {
         const enemy = enemies[i];
-        if (!enemy.brawlerName) continue;
         if (enemy.teamId === scanData.myTeamId) continue;
         const gid = enemy.gid;
-        let t = targets.get(gid);
-        if (!t)
+        if (!gid) continue;
+        seen.add(gid);
+        let row = _live.get(gid);
+        if (!row)
         {
-            t = {
-                samples: [],
-                haveVelocity: false,
-                prevVx: 0,
-                prevVy: 0,
-                trackedVx: 0,
-                trackedVy: 0,
-                trackedAx: 0,
-                trackedAy: 0,
-                lastUpdate: now,
+            row = {
+                gid,
+                ptr: enemy.ptr || null,
                 x: enemy.x,
                 y: enemy.y,
-                brawlerId: enemy.brawlerId,
-                moveSpeed: enemy.moveSpeed || AIM_TUNING.DEFAULT_MOVE_SPEED
+                rad: enemy.radius || 0,
+                tag: enemy.kind === "spawnable" ? "prop" : "foe",
+                yaw: 0,
+                spd: 0,
+                gait: enemy.moveSpeed || 0,
+                markTs: 0,
+                markX: enemy.x,
+                markY: enemy.y
             };
-            targets.set(gid, t);
+            _live.set(gid, row);
         }
-        t.x = enemy.x;
-        t.y = enemy.y;
-        t.brawlerId = enemy.brawlerId;
-        if (enemy.moveSpeed > 0) t.moveSpeed = enemy.moveSpeed;
-        updateLolTracking(t, enemy.x, enemy.y, now);
-        t.lastUpdate = now;
-        const losClear = scanData.throwsOverWalls || hasLineOfSight(myX, myY, enemy.x, enemy.y) ? 1 : 0;
-        activeEnemies.push(
+        row.ptr = enemy.ptr || row.ptr;
+        row.x = enemy.x;
+        row.y = enemy.y;
+        row.rad = enemy.radius || row.rad;
+        row.tag = enemy.kind === "spawnable" ? "prop" : "foe";
+        if (enemy.moveSpeed > 0) row.gait = enemy.moveSpeed;
+        _motion(row, enemy.x, enemy.y, now);
+    }
+    for (const id of _live.keys())
+    {
+        if (!seen.has(id)) _live.delete(id);
+    }
+    if (bestGid && _live.has(bestGid))
+    {
+        const keep = _live.get(bestGid);
+        bestPtr = keep && keep.ptr ? keep.ptr : null;
+    }
+    else
+    {
+        const pick = _closest(scanData.myX, scanData.myY);
+        bestGid = pick ? pick.gid : null;
+        bestPtr = pick && pick.ptr ? pick.ptr : null;
+    }
+    _cacheShots(now);
+    if (_pendingLog)
+    {
+        logInfo("aimbot fire", _pendingLog);
+        _pendingLog = null;
+    }
+    if (now - _scrubTs > 1e3)
+    {
+        for (const [k, v] of _losMemo)
         {
-            gid,
-            gidInt: parseInt(gid) | 0,
-            x: enemy.x,
-            y: enemy.y,
-            brawlerId: enemy.brawlerId,
-            moveSpeed: t.moveSpeed,
-            histLen: t.samples.length,
-            vxEma: t.trackedVx,
-            vyEma: t.trackedVy,
-            losClear
-        });
-    }
-    if (activeEnemies.length > 0)
-    {
-        const prevGid = prevTargetId ? parseInt(prevTargetId) | 0 : 0;
-        const bestGid = pickBestTarget(activeEnemies, myX, myY, prevGid, _ownRange());
-        if (bestGid !== 0) bestTargetId = bestGid.toString();
-    }
-    if (isLoggingEnabled() && bestTargetId !== prevTargetId)
-    {
-        const nextEnemy = bestTargetId ? targets.get(bestTargetId) : null;
-        logInfo("aimbot best target changed",
-        {
-            prev: prevTargetId,
-            next: bestTargetId,
-            activeEnemies: activeEnemies.length,
-            allEnemies: enemies.length,
-            myX: myX | 0,
-            myY: myY | 0,
-            nextX: nextEnemy ? nextEnemy.x | 0 : 0,
-            nextY: nextEnemy ? nextEnemy.y | 0 : 0,
-            nextBrawler: nextEnemy ? nextEnemy.brawlerId : 0,
-            nextHist: nextEnemy ? nextEnemy.samples.length : 0,
-            nextVx: nextEnemy ? +nextEnemy.trackedVx.toFixed(2) : 0,
-            nextVy: nextEnemy ? +nextEnemy.trackedVy.toFixed(2) : 0
-        });
-    }
-    if (bestTargetId !== _burstLockTargetId)
-    {
-        _burstLockPos = null;
-        _burstLockTargetId = null;
-        _burstLockTgtX = null;
-        _burstLockTgtY = null;
-    }
-    if (now - _lastCleanupTs > 1e3)
-    {
-        for (const [id, t] of targets)
-        {
-            if (now - t.lastUpdate > AIM_TUNING.STALE_MS) targets.delete(id);
+            if (now - v.ts > TUNE.LOS_PURGE_MS) _losMemo.delete(k);
         }
-        for (const [k, v] of _losCache)
-        {
-            if (now - v.ts > AIM_TUNING.LOS_CACHE_PURGE_MS) _losCache.delete(k);
-        }
-        _lastCleanupTs = now;
+        _scrubTs = now;
     }
 }

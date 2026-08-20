@@ -88,6 +88,12 @@ import
 from "./features/fps.js";
 import
 {
+    resetFpsUnlock,
+    setupFpsUnlock
+}
+from "./features/fpsunlock.js";
+import
+{
     resetCombat,
     setupCombat
 }
@@ -165,11 +171,13 @@ import
     FLAG_SPRAY,
     FLAG_SPEEDHACK,
     getFlags,
+    registerFeature,
     setState,
     setupSafe,
     state
 }
 from "./utils/flags.js";
+registerFeature("fpsunlock");
 import
 {
     logInfo,
@@ -245,6 +253,10 @@ var _modules = {
     {
         setup: setupFps
     },
+    fpsunlock:
+    {
+        setup: setupFpsUnlock
+    },
     ipgrabber:
     {
         setup: setupIPGrabber
@@ -266,6 +278,7 @@ var _moduleByFeature = {
     spray: "spray",
     speedhack: "speedhack",
     fps: "fps",
+    fpsunlock: "fpsunlock",
     ipgrabber: "ipgrabber"
 };
 
@@ -402,6 +415,7 @@ var _onDisable = {
     chatspam: stopChatSpam,
     holdshoot: resetHoldShoot,
     speedhack: resetSpeedhack,
+    fpsunlock: resetFpsUnlock,
     gradient: applyGradientAll
 };
 rpc.exports = {
@@ -465,6 +479,7 @@ rpc.exports = {
         resetSpectator();
         resetChatSpam();
         resetFps();
+        resetFpsUnlock();
         resetHoldShoot();
         resetSpeedhack();
         resetCombat();

@@ -20,6 +20,7 @@ import
 from "../utils/flags.js";
 import
 {
+    logError,
     logEvery,
     logInfo
 }
@@ -371,17 +372,12 @@ const speedHack = {
                 tx: target.x,
                 ty: target.y,
                 speed: speed | 0,
-                step: step | 0,
-                tps: this.tps | 0,
-                pending: +this.pending.toFixed(2),
-                dodge: !!dodge,
-                dirX: +dirX.toFixed(3),
-                dirY: +dirY.toFixed(3)
+                dodge: !!dodge
             });
         }
         catch (e)
         {
-            logEvery(40, "speedhack tick error",
+            logError("speedhack tick failed",
             {
                 err: String(e && e.message || e)
             });

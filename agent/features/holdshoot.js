@@ -133,14 +133,12 @@ export function updateHoldShoot(now)
                     lastAttackMs = now;
                     logEvery(20, "holdshoot attack",
                     {
-                        target: target.gid,
+                        id: target.gid,
+                        x: fire.fireX | 0,
+                        y: fire.fireY | 0,
                         myX: myX | 0,
                         myY: myY | 0,
-                        tx: target.x | 0,
-                        ty: target.y | 0,
-                        fireX: fire.fireX | 0,
-                        fireY: fire.fireY | 0,
-                        rangeCheck: !!options.rangeCheck
+                        dist: Math.hypot(fire.fireX - myX, fire.fireY - myY) | 0
                     });
                 }
             }
@@ -153,12 +151,13 @@ export function updateHoldShoot(now)
             const fire = aimPoint(myX, myY, target, skillProjectileSpeed(data));
             logInfo("holdshoot super",
             {
-                target: target.gid,
-                resolved: !!data,
+                id: target.gid,
+                x: fire.fireX | 0,
+                y: fire.fireY | 0,
                 myX: myX | 0,
                 myY: myY | 0,
-                fireX: fire.fireX | 0,
-                fireY: fire.fireY | 0
+                dist: Math.hypot(fire.fireX - myX, fire.fireY - myY) | 0,
+                resolved: !!data
             });
             castSkill(data, myX, myY, fire.fireX, fire.fireY);
         }

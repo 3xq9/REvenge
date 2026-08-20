@@ -18,6 +18,11 @@ import
     canonBrawlerName
 }
 from "../utils/brawlerName.js";
+import
+{
+    state
+}
+from "../utils/flags.js";
 
 var moduleBase = null;
 var _brawlerNameCache = new Map();
@@ -28,6 +33,12 @@ var _destroyed = [];
 var _friendlyIdx = new Set();
 var _projectileHooksInstalled = false;
 var MASSIVE_RADIUS_THRESHOLD = 380;
+var CASTING_RANGE_SCALE = 100;
+var SKILL_SLOT_MAX = 8;
+var PROJ_INDEX_MAX = 4;
+var _rangeByName = new Map();
+var _harvestedChars = new Set();
+var _charsByIndex = new Map();
 
 export var scanData = {
     ownCharacter: ptr(0),
@@ -162,6 +173,23 @@ function _readOwnerIndex(obj)
     }
 }
 
+function _bodyOf(obj)
+{
+    if (!_validPtr(obj)) return obj;
+    try
+    {
+        const body = obj.add(offsets.LogicCharacterClient_body).readPointer();
+        if (!_validPtr(body) || body.equals(obj)) return obj;
+        const objVt = obj.readPointer();
+        const bodyVt = body.readPointer();
+        if (!_validPtr(objVt) || !_validPtr(bodyVt) || !bodyVt.equals(objVt)) return obj;
+        return body;
+    }
+    catch (_)
+    {}
+    return obj;
+}
+
 function _ownerNameByIndex(ownerIndex)
 {
     if (ownerIndex < 0) return null;
@@ -210,6 +238,122 @@ function _readTarget(fns, projectile)
     };
 }
 
+function _noteCastRange(name, units)
+{
+    if (!name || !(units > 0) || units >= 70000) return;
+    const prev = _rangeByName.get(name) || 0;
+    if (units > prev) _rangeByName.set(name, units);
+}
+
+function _harvestSkillData(fns, skillData)
+{
+    if (!_validPtr(skillData) || !fns.LogicSkillData_getCastingRange || !fns.LogicSkillData_getProjectileData) return;
+    try
+    {
+        const tiles = fns.LogicSkillData_getCastingRange(skillData) | 0;
+        if (tiles <= 0) return;
+        const units = tiles * CASTING_RANGE_SCALE;
+        for (let i = 0; i < PROJ_INDEX_MAX; i++)
+        {
+            const proj = fns.LogicSkillData_getProjectileData(skillData, i);
+            if (!_validPtr(proj)) continue;
+            _noteCastRange(_readProjectileName(proj), units);
+        }
+    }
+    catch (_)
+    {}
+}
+
+function _harvestCharacter(character)
+{
+    if (!_validPtr(character)) return false;
+    const fns = getFunctions();
+    let found = false;
+    try
+    {
+        if (fns.LogicCharacterClient_getWeaponSkill)
+        {
+            const weapon = fns.LogicCharacterClient_getWeaponSkill(character);
+            if (_validPtr(weapon))
+            {
+                _harvestSkillData(fns, weapon);
+                found = true;
+            }
+        }
+    }
+    catch (_)
+    {}
+    if (!fns.LogicCharacterClient_getSkillAt || !fns.LogicSkillClient_getData) return found;
+    for (let slot = 0; slot < SKILL_SLOT_MAX; slot++)
+    {
+        try
+        {
+            const skill = fns.LogicCharacterClient_getSkillAt(character, slot);
+            if (!_validPtr(skill)) continue;
+            for (let hyper = 0; hyper < 2; hyper++)
+            {
+                const data = fns.LogicSkillClient_getData(skill, hyper);
+                if (!_validPtr(data)) continue;
+                _harvestSkillData(fns, data);
+                found = true;
+            }
+        }
+        catch (_)
+        {}
+    }
+    return found;
+}
+
+function _rememberCharacter(index, character)
+{
+    if (index < 0 || !_validPtr(character)) return;
+    _charsByIndex.set(index, character);
+    const key = character.toString();
+    if (_harvestedChars.has(key)) return;
+    if (_harvestCharacter(character)) _harvestedChars.add(key);
+}
+
+function _castRangeFor(name, ownerIndex)
+{
+    const cached = name ? _rangeByName.get(name) || 0 : 0;
+    if (cached > 0) return cached;
+    if (ownerIndex >= 0)
+    {
+        const owner = _charsByIndex.get(ownerIndex);
+        if (_validPtr(owner) && _harvestCharacter(owner) && name)
+        {
+            return _rangeByName.get(name) || 0;
+        }
+    }
+    return 0;
+}
+
+function _ownerPos(ownerIndex)
+{
+    if (ownerIndex < 0) return null;
+    if (ownerIndex === scanData.myPlayerIndex)
+    {
+        return {
+            x: scanData.myX,
+            y: scanData.myY
+        };
+    }
+    const character = _charsByIndex.get(ownerIndex);
+    if (!_validPtr(character)) return null;
+    try
+    {
+        const fns = getFunctions();
+        return {
+            x: fns.LogicGameObjectClient_getX(character) | 0,
+            y: fns.LogicGameObjectClient_getY(character) | 0
+        };
+    }
+    catch (_)
+    {
+        return null;
+    }
+}
+
 function _captureProjectile(projectile, data, ownerTeamOverride)
 {
     if (!_validPtr(projectile)) return;
@@ -237,6 +381,15 @@ function _captureProjectile(projectile, data, ownerTeamOverride)
         const angle = _readAngle(projectile, rendering);
         const target = _readTarget(fns, projectile);
         const isThrower = data.add(offsets.Projectile_isIndirect).readU32() | 0;
+        let isBeam = false;
+        try
+        {
+            isBeam = !!(fns.LogicProjectileData_isBeam && fns.LogicProjectileData_isBeam(data));
+        }
+        catch (_)
+        {
+            isBeam = false;
+        }
         let ownerTeam = ownerTeamOverride === void 0 ? 0 : ownerTeamOverride | 0;
         if (ownerTeamOverride === void 0)
         {
@@ -268,6 +421,8 @@ function _captureProjectile(projectile, data, ownerTeamOverride)
             spawnAreaActiveTime = 0;
         }
         const classification = _classify(speed, radius);
+        const name = _readProjectileName(data);
+        const castRange = _castRangeFor(name, ownerIndex);
         _liveProjectiles.set(gid,
         {
             gid,
@@ -276,7 +431,7 @@ function _captureProjectile(projectile, data, ownerTeamOverride)
             ownerTeam,
             ownerIndex,
             ownerName: _ownerNameByIndex(ownerIndex),
-            name: _readProjectileName(data),
+            name,
             x,
             y,
             spawnX: x,
@@ -288,8 +443,10 @@ function _captureProjectile(projectile, data, ownerTeamOverride)
             rendering,
             angle,
             isThrower,
+            isBeam,
             spawnAreaRadius,
             spawnAreaActiveTime,
+            castRange,
             hitRadius: classification.hitRadius,
             isSlow: classification.isSlow,
             isSpread: classification.isSpread,
@@ -382,6 +539,11 @@ function _updateLiveProjectiles(now)
                 _liveProjectiles.delete(gid);
                 continue;
             }
+            if (now - (projectile.lastSeenAt || 0) > 800)
+            {
+                _liveProjectiles.delete(gid);
+                continue;
+            }
             const x = fns.LogicGameObjectClient_getX(projectile.ptr) | 0;
             const y = fns.LogicGameObjectClient_getY(projectile.ptr) | 0;
             if (projectile.targetX === 0 && projectile.targetY === 0)
@@ -419,6 +581,16 @@ function _updateLiveProjectiles(now)
             projectile.lastY = y;
             projectile.lastTs = now;
             projectile.ownerName = _ownerNameByIndex(projectile.ownerIndex);
+            const ownerPos = _ownerPos(projectile.ownerIndex);
+            if (ownerPos)
+            {
+                projectile.ownerX = ownerPos.x;
+                projectile.ownerY = ownerPos.y;
+            }
+            if (!(projectile.castRange > 0))
+            {
+                projectile.castRange = _castRangeFor(projectile.name, projectile.ownerIndex);
+            }
             if (projectile.ownerIndex >= 0 && _friendlyIdx.has(projectile.ownerIndex)) continue;
             if (projectile.ownerTeam === scanData.myTeamId) continue;
             output.push(
@@ -429,6 +601,8 @@ function _updateLiveProjectiles(now)
                 ownerTeam: projectile.ownerTeam,
                 ownerIndex: projectile.ownerIndex,
                 ownerName: projectile.ownerName,
+                ownerX: projectile.ownerX,
+                ownerY: projectile.ownerY,
                 x,
                 y,
                 spawnX: projectile.spawnX,
@@ -441,8 +615,10 @@ function _updateLiveProjectiles(now)
                 rendering: projectile.rendering,
                 angle: projectile.angle,
                 isThrower: projectile.isThrower,
+                isBeam: !!projectile.isBeam,
                 spawnAreaRadius: projectile.spawnAreaRadius,
                 spawnAreaActiveTime: projectile.spawnAreaActiveTime,
+                castRange: projectile.castRange || 0,
                 isSlow: projectile.isSlow,
                 isSpread: projectile.isSpread,
                 isSniper: projectile.isSniper,
@@ -484,8 +660,19 @@ export function updateScanner(bm, now)
         scanData.myPlayerIndex = functions.LogicBattleModeClient_getOwnPlayerIndex ? functions.LogicBattleModeClient_getOwnPlayerIndex(bm) | 0 : _readOwnerIndex(own);
         _friendlyIdx.clear();
         _friendlyIdx.add(scanData.myPlayerIndex);
-        scanData.myX = functions.LogicGameObjectClient_getX(own) | 0;
-        scanData.myY = functions.LogicGameObjectClient_getY(own) | 0;
+        _charsByIndex.clear();
+        _rememberCharacter(scanData.myPlayerIndex, own);
+        try
+        {
+            const self = _bodyOf(own);
+            scanData.myX = functions.LogicGameObjectClient_getX(self) | 0;
+            scanData.myY = functions.LogicGameObjectClient_getY(self) | 0;
+        }
+        catch (_)
+        {
+            scanData.myX = functions.LogicGameObjectClient_getX(own) | 0;
+            scanData.myY = functions.LogicGameObjectClient_getY(own) | 0;
+        }
         scanData.hasCarryable = _readHasCarryable(functions, own, bm);
         scanData.throwsOverWalls = _readThrowsOverWalls(functions, own);
         scanData.mySpeed = 720;
@@ -552,8 +739,7 @@ export function updateScanner(bm, now)
                         const team = obj.add(offsets.GameObj_team).readU32();
                         if (data.readPointer().equals(vtableProj))
                         {
-                            if (team === scanData.myTeamId) continue;
-                            _captureProjectile(obj, data, team);
+                            if (state.autododge && team !== scanData.myTeamId) _captureProjectile(obj, data, team);
                             continue;
                         }
                         if (team === scanData.myTeamId)
@@ -570,7 +756,15 @@ export function updateScanner(bm, now)
                             brawlerName = _readHeroIconName(data);
                             _brawlerNameCache.set(gid, brawlerName);
                         }
-                        if (!brawlerName) continue;
+                        let radius = 0;
+                        try
+                        {
+                            radius = functions.LogicCharacterData_getCollisionRadius ? functions.LogicCharacterData_getCollisionRadius(data) | 0 : 0;
+                        }
+                        catch (_)
+                        {}
+                        if (!brawlerName && radius <= 0) continue;
+                        const kind = brawlerName ? "player" : "spawnable";
                         let moveSpeed = 0;
                         try
                         {
@@ -578,17 +772,32 @@ export function updateScanner(bm, now)
                         }
                         catch (_)
                         {}
+                        const playerIndex = _readOwnerIndex(obj);
+                        if (brawlerName) _rememberCharacter(playerIndex, obj);
+                        let brawlerId = 0;
+                        if (brawlerName)
+                        {
+                            try
+                            {
+                                brawlerId = data.add(offsets.CharData_brawlerId).readU8() | 0;
+                            }
+                            catch (_)
+                            {}
+                        }
+                        const body = _bodyOf(obj);
                         enemies.push(
                         {
                             gid,
                             ptr: obj,
-                            x: functions.LogicGameObjectClient_getX(obj) | 0,
-                            y: functions.LogicGameObjectClient_getY(obj) | 0,
-                            brawlerId: data.add(offsets.CharData_brawlerId).readU8() | 0,
+                            x: functions.LogicGameObjectClient_getX(body) | 0,
+                            y: functions.LogicGameObjectClient_getY(body) | 0,
+                            brawlerId,
                             brawlerName,
                             teamId: team,
-                            playerIndex: _readOwnerIndex(obj),
-                            moveSpeed
+                            playerIndex,
+                            moveSpeed,
+                            radius: radius,
+                            kind: kind
                         });
                     }
                     catch (_)
@@ -608,7 +817,15 @@ export function updateScanner(bm, now)
         }
         scanData.enemies = enemies;
         scanData.destroyed = _destroyed.splice(0);
-        scanData.projectiles = _updateLiveProjectiles(now);
+        if (state.autododge)
+        {
+            scanData.projectiles = _updateLiveProjectiles(now);
+        }
+        else
+        {
+            if (_liveProjectiles.size) _liveProjectiles.clear();
+            scanData.projectiles = [];
+        }
         scanData.liveProjectiles = _liveProjectiles.size;
         scanData.lastUpdate = now;
     }
@@ -621,6 +838,8 @@ export function resetScannerCache()
     _brawlerNameCache.clear();
     _liveProjectiles.clear();
     _friendlyIdx.clear();
+    _charsByIndex.clear();
+    _harvestedChars.clear();
     _destroyed.length = 0;
     scanData.projectiles = [];
     scanData.destroyed = [];

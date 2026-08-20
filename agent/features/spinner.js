@@ -27,7 +27,9 @@ import
 from "./autododge.js";
 import
 {
-    logEvery
+    logError,
+    logEvery,
+    logInfo
 }
 from "../utils/logger.js";
 
@@ -36,6 +38,7 @@ var SPIN_RADIUS = 20;
 var SPIN_STEP = Math.PI / 4;
 var SPIN_ALLOW_MOVING = false;
 var _spinPhase = 0;
+var _moved = false;
 
 export function setSpinnerOptions(opts)
 {
@@ -58,6 +61,7 @@ export function setSpinnerOptions(opts)
 export function resetSpinner()
 {
     _spinPhase = 0;
+    _moved = false;
 }
 
 function _spinTarget(self)
@@ -98,17 +102,25 @@ export function setupSpinner(base)
                     if (!target) return;
                     const fns = getFunctions();
                     sendBattleMove(fns.BattleScreen_getLogicBattleModeClient(self), target.x, target.y);
+                    if (!_moved)
+                    {
+                        _moved = true;
+                        logInfo("spinner move",
+                        {
+                            x: target.x,
+                            y: target.y
+                        });
+                    }
                     logEvery(80, "spinner tick",
                     {
                         x: target.x,
                         y: target.y,
-                        phase: +_spinPhase.toFixed(3),
-                        dodgeOverride: !!(state.autododge && getDodgeDir())
+                        phase: +_spinPhase.toFixed(3)
                     });
                 }
                 catch (e)
                 {
-                    logEvery(40, "spinner tick error",
+                    logError("spinner tick failed",
                     {
                         err: String(e && e.message || e)
                     });

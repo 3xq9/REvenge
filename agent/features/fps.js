@@ -20,6 +20,7 @@ import
 from "../utils/flags.js";
 import
 {
+    logEvery,
     logInfo
 }
 from "../utils/logger.js";
@@ -100,7 +101,11 @@ function _build()
 
 function _show(text)
 {
-    if (!_container && !_build()) return;
+    if (!_container && !_build())
+    {
+        logEvery(90, "fps label wait");
+        return;
+    }
     _container.add(offsets.DisplayObject_x).writeFloat(_posX);
     _container.add(offsets.DisplayObject_y).writeFloat(_posY);
     _container.add(offsets.DisplayObject_visible).writeU8(1);
@@ -113,6 +118,7 @@ function _hide()
 {
     if (!_container) return;
     _container.add(offsets.DisplayObject_visible).writeU8(0);
+    if (_lastText !== null) logInfo("fps hidden");
     _lastText = null;
 }
 
@@ -165,12 +171,24 @@ export function setupFps(base)
                     _wasOn = true;
                     _samples.length = 0;
                     _lastEmit = now;
+                    logInfo("fps shown",
+                    {
+                        x: _posX | 0,
+                        y: _posY | 0
+                    });
                 }
                 _samples.push(now);
                 while (_samples.length && now - _samples[0] > SAMPLE_WINDOW_MS) _samples.shift();
                 if (now - _lastEmit < EMIT_MS) return;
                 _lastEmit = now;
-                _show("FPS: " + (_samples.length | 0));
+                const fps = _samples.length | 0;
+                _show("FPS: " + fps);
+                logEvery(60, "fps sample",
+                {
+                    fps,
+                    x: _posX | 0,
+                    y: _posY | 0
+                });
             }
             catch (_)
             {}

@@ -59,16 +59,10 @@ function captureDefaults(bs)
     _defaultMode = bs.add(offsets.BattleScreen_cameraMode).readS32() | 0;
     _capturedFor = bs;
     _applied = false;
-    try
+    logInfo("camera default mode",
     {
-        send(
-        {
-            type: "CAMERA_DEFAULT_MODE",
-            value: _defaultMode
-        });
-    }
-    catch (_)
-    {}
+        mode: _defaultMode
+    });
 }
 
 export function setupCamera(base)
@@ -89,8 +83,7 @@ export function setupCamera(base)
                     if (!_applied) logInfo("camera mode applied",
                     {
                         mode: _opts.mode | 0,
-                        previous: _defaultMode,
-                        bs: String(bs)
+                        previous: _defaultMode
                     });
                     bs.add(offsets.BattleScreen_cameraMode).writeS32(_opts.mode | 0);
                     _applied = true;

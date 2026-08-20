@@ -116,13 +116,12 @@ export function updateKillaura(now)
                 lastAttackMs = now;
                 logEvery(20, "killaura attack",
                 {
-                    target: target.gid,
+                    id: target.gid,
+                    x: fire.fireX | 0,
+                    y: fire.fireY | 0,
                     myX: myX | 0,
                     myY: myY | 0,
-                    tx: target.x | 0,
-                    ty: target.y | 0,
-                    fireX: fire.fireX | 0,
-                    fireY: fire.fireY | 0,
+                    dist: Math.hypot(fire.fireX - myX, fire.fireY - myY) | 0,
                     brawler: scanData.myBrawlerName || ""
                 });
             }
@@ -135,12 +134,13 @@ export function updateKillaura(now)
             const fire = resolveFirePoint(myX, myY, target, skillProjectileSpeed(data));
             logInfo("killaura super",
             {
-                target: target.gid,
-                resolved: !!data,
+                id: target.gid,
+                x: fire.fireX | 0,
+                y: fire.fireY | 0,
                 myX: myX | 0,
                 myY: myY | 0,
-                fireX: fire.fireX | 0,
-                fireY: fire.fireY | 0,
+                dist: Math.hypot(fire.fireX - myX, fire.fireY - myY) | 0,
+                resolved: !!data,
                 brawler: scanData.myBrawlerName || ""
             });
             castSkill(data, myX, myY, fire.fireX, fire.fireY);
@@ -151,6 +151,12 @@ export function updateKillaura(now)
             lastHyperMs = now;
             logInfo("killaura hypercharge",
             {
+                id: target.gid,
+                x: target.x | 0,
+                y: target.y | 0,
+                myX: myX | 0,
+                myY: myY | 0,
+                dist: Math.hypot(target.x - myX, target.y - myY) | 0,
                 brawler: scanData.myBrawlerName || ""
             });
             activateHypercharge();

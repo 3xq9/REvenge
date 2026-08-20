@@ -10,6 +10,7 @@ import
 from "../utils/flags.js";
 import
 {
+    logError,
     logEvery
 }
 from "../utils/logger.js";
@@ -47,11 +48,22 @@ export function updatePin(now)
     if (!state.pin || !_sendPin) return;
     if (now === void 0) now = Date.now();
     if (now - _lastFire < _opts.intervalMs) return;
-    _sendPin(EMPTY_PIN_ID);
-    _lastFire = now;
-    logEvery(10, "pin sent",
+    try
     {
-        pin: EMPTY_PIN_ID,
-        intervalMs: _opts.intervalMs | 0
-    });
+        _sendPin(EMPTY_PIN_ID);
+        _lastFire = now;
+        logEvery(10, "pin sent",
+        {
+            pin: EMPTY_PIN_ID,
+            intervalMs: _opts.intervalMs | 0
+        });
+    }
+    catch (e)
+    {
+        _lastFire = now;
+        logError("pin send failed",
+        {
+            err: String(e && e.message || e)
+        });
+    }
 }

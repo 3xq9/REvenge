@@ -2,65 +2,47 @@ export const FITS = {
     orbit:
     {
         grow: 0.65,
-        close: 18000,
-        pad: 120,
-        closeR: 420
+        pad: 120
     },
     long:
     {
         grow: 0.55,
-        close: 12000,
-        pad: 90,
-        closeR: 360
+        pad: 90
     },
     thick:
     {
         grow: 0.6,
-        close: 14000,
-        pad: 100,
-        closeR: 380
+        pad: 100
     },
     broad:
     {
         grow: 0.45,
-        close: 9000,
-        pad: 70,
-        closeR: 320
+        pad: 70
     },
     half:
     {
         grow: 0.4,
-        close: 6000,
-        pad: 50,
-        closeR: 260
+        pad: 50
     },
     plain:
     {
         grow: 0.45,
-        close: 6000,
-        pad: 60,
-        closeR: 280
+        pad: 60
     },
     ray:
     {
         grow: 0.5,
-        close: 11000,
-        pad: 80,
-        closeR: 340
+        pad: 80
     },
     thin:
     {
         grow: 0.35,
-        close: 5000,
-        pad: 40,
-        closeR: 240
+        pad: 40
     },
     fallback:
     {
         grow: 0.45,
-        close: 6000,
-        pad: 60,
-        closeR: 280
+        pad: 60
     }
 };
 
@@ -120,8 +102,7 @@ export const KINDS = {
     BulletstormOnShellPickedUpProjectile:
     {
         fit: "plain",
-        maxRange: 3300,
-        close: 8000
+        maxRange: 3300
     },
     ElectroSniperProjectile:
     {
@@ -450,13 +431,11 @@ export const KINDS = {
     },
     ControllerUltiProjectile:
     {
-        fit: "broad",
-        growR: 150
+        drop: true
     },
     ControllerUltiOverchargedProjectile:
     {
-        fit: "broad",
-        growR: 150
+        drop: true
     },
     AxeJugglerProjectile:
     {
@@ -581,8 +560,7 @@ export const KINDS = {
         fit: "long",
         growR: 250,
         reachAdj: -250,
-        lockPath: true,
-        home: true
+        lockPath: true
     },
     WhirlwindProjectile2:
     {
@@ -592,8 +570,7 @@ export const KINDS = {
     MorningstarProjectile:
     {
         growR: 150,
-        maxRange: 2700,
-        home: true
+        maxRange: 2700
     },
     MorningstarProjectileRecall:
     {

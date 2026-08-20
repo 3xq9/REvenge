@@ -26,9 +26,8 @@ import
 from "../utils/flags.js";
 import
 {
-    isLoggingEnabled,
-    logEvery,
-    logInfo
+    logInfo,
+    logWarn
 }
 from "../utils/logger.js";
 import
@@ -64,8 +63,8 @@ from "../utils/wallCache.js";
 
 const MOVE_INPUT_TYPE = 2;
 var TUNE = {
-    AWARE: 1500,
-    FALLBACK: 2800,
+    AWARE: 3200,
+    RANGE_FALLBACK: 2800,
     TICK_MS: 16,
     DIR_COUNT: 48,
     SKIN: 50,
@@ -92,7 +91,6 @@ var _ring = [];
 var _scoreBuf = [];
 var _skip = new Set();
 var _options = {
-    activationDistance: 1500,
     reactionSpeed: 50,
     directionPrecision: 48,
     safetyMargin: 25
@@ -118,7 +116,6 @@ _buildRing();
 
 function _syncTuning()
 {
-    TUNE.AWARE = Math.max(200, Math.min(4000, _options.activationDistance));
     const t = Math.max(0, Math.min(100, _options.reactionSpeed)) / 100;
     TUNE.TICK_MS = Math.max(16, Math.round(32 - t * 16));
     TUNE.LOCK_MS = Math.max(80, Math.round(260 - t * 180));
@@ -140,10 +137,6 @@ export function getDodgeDir()
 export function setAutododgeOptions(opts)
 {
     if (!opts || typeof opts !== "object") return;
-    if (typeof opts.activationDistance === "number" && isFinite(opts.activationDistance))
-    {
-        _options.activationDistance = Math.max(200, Math.min(4000, opts.activationDistance));
-    }
     if (typeof opts.reactionSpeed === "number" && isFinite(opts.reactionSpeed))
     {
         _options.reactionSpeed = Math.max(0, Math.min(100, opts.reactionSpeed));
@@ -167,20 +160,6 @@ export function setAutododgeOptions(opts)
         _muted.clear();
     }
     _syncTuning();
-    logInfo("autododge tuning",
-    {
-        ignoredCount: _skip.size,
-        ignored: Array.from(_skip),
-        TICK_MS: TUNE.TICK_MS,
-        LOCK_MS: TUNE.LOCK_MS,
-        DIR_COUNT: TUNE.DIR_COUNT,
-        AWARE: TUNE.AWARE,
-        SKIN: TUNE.SKIN,
-        REACH: TUNE.REACH,
-        ENGAGE: TUNE.ENGAGE,
-        KEEP_BAND: TUNE.KEEP_BAND,
-        RELEASE_GRACE_MS: TUNE.RELEASE_GRACE_MS
-    });
 }
 
 function _ballR(p)
@@ -199,18 +178,37 @@ function _traveled(p)
 
 function _kindReach(p, spec, spd)
 {
-    if (spec && spec.speedMul > 0) spd *= spec.speedMul;
     let r = spec && spec.maxRange > 0 ? spec.maxRange : 0;
     if (spec && spec.chargedRange > 0 && spd > 3500) r = spec.chargedRange;
+    if (r <= 0 && p.castRange > 0) r = p.castRange;
     if (r <= 0 && p.isThrower && (p.targetX || p.targetY) && isFinite(p.spawnX) && isFinite(p.spawnY))
     {
         const td = Math.hypot(p.targetX - p.spawnX, p.targetY - p.spawnY);
         if (td > 0) r = td;
     }
-    if (r <= 0) r = TUNE.FALLBACK;
+    if (r <= 0) r = TUNE.RANGE_FALLBACK;
     if (spec && spec.reachAdj) r += spec.reachAdj;
     if (r > 0 && r < 70000) return r;
-    return TUNE.FALLBACK;
+    return TUNE.RANGE_FALLBACK;
+}
+
+function _homePos(p)
+{
+    if (isFinite(p.ownerX) && isFinite(p.ownerY) && (p.ownerX || p.ownerY))
+    {
+        return {
+            x: p.ownerX,
+            y: p.ownerY
+        };
+    }
+    if (p.targetX || p.targetY)
+    {
+        return {
+            x: p.targetX,
+            y: p.targetY
+        };
+    }
+    return null;
 }
 
 function _lifeLeft(p, spec, spd, nowMs)
@@ -221,9 +219,10 @@ function _lifeLeft(p, spec, spd, nowMs)
         const age = Math.max(0, nowMs - (p.spawnedAt || nowMs));
         return Math.max(0, maxR * (1 - age / 1000));
     }
-    if (spec && spec.home && (p.targetX || p.targetY))
+    if (spec && spec.home)
     {
-        return Math.hypot(p.targetX - p.x, p.targetY - p.y);
+        const home = _homePos(p);
+        if (home) return Math.hypot(home.x - p.x, home.y - p.y);
     }
     const flown = _traveled(p);
     return Math.max(0, maxR - flown);
@@ -309,9 +308,21 @@ function _collectLive(myX, myY, myRadius, nowMs)
             vx = 0;
             vy = 0;
         }
-        const spd = Math.hypot(vx, vy);
+        const flown = _traveled(p);
+        if (spec && spec.lockPath && flown > 120 && isFinite(p.spawnX) && isFinite(p.spawnY))
+        {
+            vx = (p.x - p.spawnX) / flown * (p.speed || 1);
+            vy = (p.y - p.spawnY) / flown * (p.speed || 1);
+        }
+        let spd = Math.hypot(vx, vy);
+        if (spec && spec.speedMul > 0 && spd > 3500)
+        {
+            vx *= spec.speedMul;
+            vy *= spec.speedMul;
+            spd *= spec.speedMul;
+        }
         const slow = (p.speed || 0) > 0 && p.speed < 1600;
-        const lockPath = !!(spec && spec.lockPath);
+        const lockPath = !!(spec && spec.lockPath) || !!p.isBeam;
         const blob = !!(spec && spec.blob) || !lockPath && (p.isThrower || slow);
         const bodyR = myRadius + TUNE.SKIN;
         const fit = fitOf(name);
@@ -338,11 +349,10 @@ function _collectLive(myX, myY, myRadius, nowMs)
             }
         }
         const left = _lifeLeft(p, spec, spd, nowMs);
-        if (blob)
-        {
-            const gap = Math.hypot(p.x - myX, p.y - myY) - bodyR - shotR;
-            if (left < 0.85 * gap) continue;
-        }
+        if (left <= 10) continue;
+        const gap = Math.hypot(p.x - myX, p.y - myY) - bodyR - shotR;
+        if (left < 0.85 * Math.max(0, gap)) continue;
+        if (!blob && spd >= 1 && playerAlong > left + shotR) continue;
         out.push(
         {
             x: p.x,
@@ -350,11 +360,12 @@ function _collectLive(myX, myY, myRadius, nowMs)
             vx: blob ? 0 : vx,
             vy: blob ? 0 : vy,
             rad,
-            pathLen: Math.max(left, playerAlong) + shotR,
+            pathLen: left + shotR,
             left,
             name,
             blob,
             owner: owner ? canonBrawlerName(owner) || owner : "",
+            castRange: p.castRange || 0,
             age: spec && spec.fade ? Math.max(0, nowMs - (p.spawnedAt || nowMs)) : 0,
             fadeBase: spec && spec.fadeBase || 0,
             fadeK: spec && spec.fadeK || 0
@@ -522,7 +533,7 @@ function _sendMove(logic, tx, ty)
     }
     catch (e)
     {
-        logInfo("autododge send failed",
+        logWarn("autododge send failed",
         {
             err: String(e && e.message || e)
         });
@@ -548,35 +559,11 @@ export function updateAutododge()
     const myY = scanData.myY;
     const speed = scanData.mySpeed || 720;
     const myRadius = scanData.myRadius || 60;
-    const logging = isLoggingEnabled();
     const hazards = _collectLive(myX, myY, myRadius, now);
-    if (logging)
-    {
-        logEvery(60, "heartbeat",
-        {
-            myX,
-            myY,
-            speed,
-            myR: myRadius,
-            scanProj: scanData.projectiles ? scanData.projectiles.length : -1,
-            threats: hazards.length,
-            tracks: _muted.size,
-            scan: TUNE.AWARE,
-            pad: TUNE.SKIN,
-            nDirs: TUNE.DIR_COUNT
-        });
-    }
     if (hazards.length === 0)
     {
         if (_heading && now - _lastDangerTs > TUNE.RELEASE_GRACE_MS) _clearHeading();
         return;
-    }
-    let hasBlob = false;
-    const names = [];
-    for (let i = 0; i < hazards.length; i++)
-    {
-        if (hazards[i].blob) hasBlob = true;
-        if (hazards[i].name && names.length < 4) names.push(hazards[i].name);
     }
     const stayClear = _clearanceFor(hazards, myX, myY, 0, 0);
     const inDanger = stayClear < TUNE.ENGAGE;
@@ -584,12 +571,6 @@ export function updateAutododge()
     if (!inDanger && (!_heading || now - _lastDangerTs > TUNE.RELEASE_GRACE_MS))
     {
         if (_heading) _clearHeading();
-        if (logging) logEvery(30, "safe-no-dodge",
-        {
-            stayClear: stayClear | 0,
-            threats: hazards.length,
-            names
-        });
         return;
     }
     const prevIdx = _headingIdx >= 0 && _headingIdx < _ring.length ? _headingIdx : -1;
@@ -639,37 +620,33 @@ export function updateAutododge()
         y: Math.round(myY + chosen.y * TUNE.REACH)
     };
     const ok = state.speedhack ? true : _sendMove(scanData.battleModeClient, target.x, target.y);
-    if (logging)
+    if (chosenIdx !== prevIdx)
     {
-        logEvery(15, "dodge",
+        const names = [];
+        for (let i = 0; i < hazards.length && names.length < 4; i++)
         {
-            threats: hazards.length,
-            stayClear: stayClear | 0,
+            if (hazards[i].name) names.push(hazards[i].name);
+        }
+        logInfo("autododge dodge",
+        {
+            names,
+            id: names[0] || "",
+            x: target.x,
+            y: target.y,
             myX: myX | 0,
             myY: myY | 0,
-            speed: speed | 0,
-            nx: +chosen.x.toFixed(2),
-            ny: +chosen.y.toFixed(2),
-            tx: target.x,
-            ty: target.y,
-            score: _scoreBuf[chosenIdx] | 0,
-            stayScore: stayClear | 0,
-            reach: TUNE.REACH,
-            idx: chosenIdx,
-            prevIdx,
-            committed: chosenIdx === prevIdx,
-            sent: ok,
-            area: hasBlob,
-            names
+            dist: Math.hypot(target.x - myX, target.y - myY) | 0,
+            threats: hazards.length,
+            sent: ok
         });
     }
 }
 
 export function resetAutododge()
 {
-    if (isLoggingEnabled() && (_muted.size > 0 || _heading))
+    if (_muted.size > 0 || _heading)
     {
-        logInfo("resetAutododge",
+        logInfo("autododge reset",
         {
             tracks: _muted.size,
             heading: !!_heading,

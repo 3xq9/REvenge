@@ -45,6 +45,7 @@ export function initFunctions(baseIn)
         AreaEffectData_getRadius: _nf("AreaEffectData__getRadius", "int32", ["pointer"]),
         AreaEffectData_getActiveTimeMs: _nf("AreaEffectData__getActiveTimeMs", "int32", ["pointer"]),
         LogicProjectileData_getRendering: _nf("LogicProjectileData_getRendering", "int32", ["pointer"]),
+        LogicProjectileData_isBeam: _nf("LogicProjectileData__isBeam", "bool", ["pointer"]),
         LogicCharacterData_getSpeed: _nf("LogicCharacterData_getSpeed", "int32", ["pointer"]),
         LogicCharacterData_getCollisionRadius: _nf("LogicCharacterData_getCollisionRadius", "uint32", ["pointer"]),
         BattleScreen_getLogicBattleModeClient: _nf("GameScreen__getLogicBattle", "pointer", ["pointer"]),

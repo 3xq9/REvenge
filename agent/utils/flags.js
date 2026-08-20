@@ -31,6 +31,14 @@ FEATURE_NAMES.forEach((name, index) =>
     state[name] = false;
 });
 
+export function registerFeature(name)
+{
+    if (name in state) return;
+    FLAG_OF[name] = 1 << FEATURE_NAMES.length;
+    FEATURE_NAMES.push(name);
+    state[name] = false;
+}
+
 export var FLAG_AIMBOT = FLAG_OF.aimbot;
 export var FLAG_AUTODODGE = FLAG_OF.autododge;
 export var FLAG_ESP = FLAG_OF.esp;

@@ -10,6 +10,7 @@ import
 from "../core/offsets.js";
 import
 {
+    logError,
     logEvery,
     logInfo
 }
@@ -54,8 +55,13 @@ function _sendOnce()
             preview: text.slice(0, 24)
         });
     }
-    catch (_)
-    {}
+    catch (e)
+    {
+        logError("chatspam send failed",
+        {
+            err: String(e && e.message || e)
+        });
+    }
 }
 
 function _stopTimer()
