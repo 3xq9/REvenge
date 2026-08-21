@@ -18,6 +18,7 @@ var FEATURE_NAMES = [
     "spec",
     "chatspam",
     "fps",
+    "fpsunlock",
     "gradient",
     "holdshoot",
     "speedhack"
