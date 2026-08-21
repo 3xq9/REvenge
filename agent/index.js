@@ -171,13 +171,11 @@ import
     FLAG_SPRAY,
     FLAG_SPEEDHACK,
     getFlags,
-    registerFeature,
     setState,
     setupSafe,
     state
 }
 from "./utils/flags.js";
-registerFeature("fpsunlock");
 import
 {
     logInfo,
